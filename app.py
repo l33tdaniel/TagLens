@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from typing import Iterable, Optional
 from urllib.parse import urlencode
 
@@ -34,33 +32,46 @@ async def _ensure_database() -> None:
 app.startup_handler(_ensure_database)
 
 
-def _html_response(body: str, *, status: int = 200, title: str = "TagLens") -> Response:
+def _get_cookie_value(request: Request, name: str) -> Optional[str]:
+    """Extract a single cookie value from the request headers."""
+    cookie_header = request.headers.get("cookie")
+    if not cookie_header:
+        return None
+    for chunk in cookie_header.split(";"):
+        key, sep, value = chunk.strip().partition("=")
+        if not sep:
+            continue
+        if key.strip() == name:
+            return value
+    return None
+
+
+def _html_response(body: str, *, status: int = 200) -> Response:
     """Wrap an HTML body inside a minimal Robyn response."""
     return Response(
         status_code=status,
         headers={"content-type": "text/html; charset=utf-8"},
-        description=title,
-        body=body,
+        description=body,
     )
 
 
 def _build_nav(user: Optional[UserRecord]) -> str:
     """Render the shared navigation bar shown at the top of every page."""
-    links = ["<a href=\"/\">Home</a>", "<a href=\"/public\">Public</a>"]
+    links = ['<a href="/">Home</a>', '<a href="/public">Public</a>']
     if user:
         links.extend(
             [
-                "<a href=\"/dashboard\">Dashboard</a>",
-                "<a href=\"/profile\">Profile</a>",
-                "<a href=\"/logout\">Log out</a>",
-                f"<span class=\"status\">Signed in as {escape(user.username)}</span>",
+                '<a href="/dashboard">Dashboard</a>',
+                '<a href="/profile">Profile</a>',
+                '<a href="/logout">Log out</a>',
+                f'<span class="status">Signed in as {escape(user.username)}</span>',
             ]
         )
     else:
         links.extend(
             [
-                "<a href=\"/register\">Register</a>",
-                "<a href=\"/login\">Log in</a>",
+                '<a href="/register">Register</a>',
+                '<a href="/login">Log in</a>',
             ]
         )
     return """<nav>""" + " | ".join(links) + """</nav>"""
@@ -118,7 +129,7 @@ def _page_template(
     {message_html}
     {body}
   </main>
-  <footer>This service is run with Robyn + uvicorn and keeps credentials hashed.</footer>
+  <footer>This service is run with Robyn and keeps credentials hashed.</footer>
 </body>
 </html>
 """
@@ -126,7 +137,7 @@ def _page_template(
 
 async def _current_user(request: Request) -> Optional[UserRecord]:
     """Resolve the current user from the session cookie (if present)."""
-    token = request.cookies.get(SESSION_COOKIE_NAME)
+    token = _get_cookie_value(request, SESSION_COOKIE_NAME)
     user_id = sessions.decode(token or "")
     if not user_id:
         return None
@@ -135,7 +146,11 @@ async def _current_user(request: Request) -> Optional[UserRecord]:
 
 def _redirect(location: str) -> Response:
     """Send a 303 redirect to the user agent."""
-    return Response(status_code=303, headers={"location": location}, body="")
+    return Response(
+        status_code=303,
+        headers={"location": location},
+        description="",
+    )
 
 
 def _redirect_with_next(path: str, *, query: Optional[str] = None) -> Response:
@@ -154,12 +169,12 @@ def _normalize_redirect_path(raw: Optional[str], default: str = "/dashboard") ->
     return candidate
 
 
-async def _ensure_authenticated(request: Request) -> Optional[UserRecord]:
+async def _ensure_authenticated(request: Request) -> Response | UserRecord:
     """Return the authenticated user or issue a login redirect if missing."""
     user = await _current_user(request)
     if user:
         return user
-    target = _normalize_redirect_path(request.path)
+    target = _normalize_redirect_path(request.url.path)
     return _redirect_with_next("/login", query=urlencode({"next": target}))
 
 
@@ -185,7 +200,9 @@ def _login_form(next_path: str, *, messages: Iterable[str] | None = None) -> str
     """
 
 
-def _register_form(values: dict[str, str] | None = None, *, messages: Iterable[str] | None = None) -> str:
+def _register_form(
+    values: dict[str, str] | None = None, *, messages: Iterable[str] | None = None
+) -> str:
     """Return the registration form while preserving prior input and errors."""
     vals = values or {}
     username = escape(vals.get("username", ""))
@@ -372,7 +389,9 @@ async def register_post(request: Request) -> Response:
         return _html_response(
             _page_template(
                 title="Register",
-                body=_register_form({"username": username, "email": email}, messages=errors),
+                body=_register_form(
+                    {"username": username, "email": email}, messages=errors
+                ),
             )
         )
     try:
@@ -384,7 +403,9 @@ async def register_post(request: Request) -> Response:
         return _html_response(
             _page_template(
                 title="Register",
-                body=_register_form({"username": username, "email": email}, messages=errors),
+                body=_register_form(
+                    {"username": username, "email": email}, messages=errors
+                ),
             )
         )
     return _redirect_with_next("/login", query=urlencode({"registered": "1"}))
@@ -396,3 +417,7 @@ async def logout(request: Request) -> Response:
     response = _redirect("/")
     response.set_cookie(SESSION_COOKIE_NAME, "", **cookie_clear_settings())
     return response
+
+
+if __name__ == "__main__":
+    app.start(_check_port=False)

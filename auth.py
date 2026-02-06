@@ -44,7 +44,11 @@ class SessionManager:
     def __init__(self, *, expiration: timedelta | int = DEFAULT_MAX_AGE) -> None:
         raw_secret = _load_secret_key()
         self.serializer = URLSafeTimedSerializer(raw_secret, salt="taglens.session")
-        self.expiration_seconds = int(expiration.total_seconds() if isinstance(expiration, timedelta) else expiration)
+        self.expiration_seconds = int(
+            expiration.total_seconds()
+            if isinstance(expiration, timedelta)
+            else expiration
+        )
 
     def create_token(self, user_id: int) -> Session:
         """Issue a signed token that embeds the user id."""
@@ -84,7 +88,11 @@ def cookie_settings(*, secure: bool | None = None) -> Dict[str, Any]:
     forced_secure = None
     if env_secure is not None:
         forced_secure = env_secure.lower() in {"1", "true", "yes"}
-    secure_flag = secure if secure is not None else forced_secure if forced_secure is not None else False
+    secure_flag = (
+        secure
+        if secure is not None
+        else forced_secure if forced_secure is not None else False
+    )
     return {
         "httponly": True,
         "samesite": "lax",
@@ -96,4 +104,11 @@ def cookie_settings(*, secure: bool | None = None) -> Dict[str, Any]:
 
 def cookie_clear_settings() -> Dict[str, Any]:
     """Special cookie instructions required to immediately forget a session."""
-    return {"max_age": 0, "expires": "Thu, 01 Jan 1970 00:00:00 GMT", "path": "/", "secure": False, "httponly": True, "samesite": "lax"}
+    return {
+        "max_age": 0,
+        "expires": "Thu, 01 Jan 1970 00:00:00 GMT",
+        "path": "/",
+        "secure": False,
+        "httponly": True,
+        "samesite": "lax",
+    }

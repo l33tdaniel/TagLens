@@ -1,11 +1,11 @@
 # TagLens Authentication Service
 
-This project is a small Robyn/uvicorn application that demonstrates a secure username/password flow.
+This project is a small Robyn application that demonstrates a secure username/password flow.
 
 **Author: Daniel Neugent**
 
 ## Features
-- `robyn` + `uvicorn` (the `uv` server you requested) runs the asynchronous ASGI app.
+- `robyn` runs the asynchronous web server.
 - SQLite stores user records with hashed-and-salted passwords using `passlib[bcrypt]`.
 - Auth-protected routes (`/dashboard`, `/profile`) redirect to `/login` when there is no session cookie.
 - Public routes (`/`, `/public`, `/register`, `/login`) remain open to everyone.
@@ -19,9 +19,9 @@ This project is a small Robyn/uvicorn application that demonstrates a secure use
    python -m venv .venv
    source .venv/bin/activate
    ```
-2. Install the dependencies:
+2. Install the dependencies (runtime and tooling):
    ```bash
-   uv install -r requirements.txt
+   uv install -r requirements.txt requirements-dev.txt
    ```
 3. Export a fixed signing secret before starting the server. Without it, the app will generate a temporary secret and warn you on the console:
    ```bash
@@ -31,10 +31,16 @@ print(secrets.token_urlsafe(32))
 PY")"
    ```
    Optionally set `ROBYN_SECURE_COOKIES=1` if you deploy behind HTTPS and want secure cookies.
-4. Run the app with uvicorn:
+4. Use the automated checks to ensure the code base compiles and is linted:
    ```bash
-   uvicorn app:app --reload --host 0.0.0.0 --port 8000
+   ./scripts/check.sh
    ```
+5. Run the app:
+   ```bash
+   ROBYN_HOST=0.0.0.0 ROBYN_PORT=8000 ./start_server.sh
+   ```
+
+   By default `./start_server.sh` launches Robyn without `--dev` because the bundled reloader is currently crashing with `RuntimeError: threads can only be started once`. Set `DEV_MODE=1` (or `DEV_MODE=true`) if you need the hot-reload behavior and can tolerate the occasional `--dev` panic until the upstream issue is resolved.
 
 ## Routes
 - `GET /` – landing page with the current authentication status.
