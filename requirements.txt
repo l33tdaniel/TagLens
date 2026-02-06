@@ -1,0 +1,6 @@
+robyn>=0.9
+uvicorn[standard]>=0.23
+passlib[bcrypt]>=1.7
+aiosqlite>=0.20
+itsdangerous>=2.1
+markupsafe>=2.1
