@@ -1,75 +1,69 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, Optional
+from typing import Dict
 
-from itsdangerous import BadData, URLSafeTimedSerializer
 from passlib.context import CryptContext
 
 # Author: Daniel Neugent
 
 SESSION_COOKIE_NAME = "taglens_session"
+CSRF_COOKIE_NAME = "taglens_csrf"
 DEFAULT_MAX_AGE = 60 * 60 * 24  # 1 day
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 @dataclass
-class Session:
+class SessionToken:
     token: str
-    user_id: int
+    token_hash: str
 
 
-def _load_secret_key() -> str:
-    """Try official and fallback env variables before generating a temporary secret."""
-    secret = os.getenv("ROBYN_SECRET_KEY")
-    if secret:
-        return secret
-    fallback = os.getenv("TAGLENS_FALLBACK_SECRET")
-    if fallback:
-        return fallback
-    random = secrets.token_urlsafe(32)
-    print(
-        "[WARN] Using a randomly generated signing secret. Sessions will break when the process restarts. Set ROBYN_SECRET_KEY to a fixed value."
-    )
-    return random
+def _token_hash(raw: str) -> str:
+    """Return a stable hash of the session token for database storage."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-class SessionManager:
-    """Generates and validates signed session tokens for website visitors."""
+def generate_session_token() -> SessionToken:
+    """Create a new opaque session token and its hash."""
+    token = secrets.token_urlsafe(32)
+    return SessionToken(token=token, token_hash=_token_hash(token))
 
-    def __init__(self, *, expiration: timedelta | int = DEFAULT_MAX_AGE) -> None:
-        raw_secret = _load_secret_key()
-        self.serializer = URLSafeTimedSerializer(raw_secret, salt="taglens.session")
-        self.expiration_seconds = int(
-            expiration.total_seconds()
-            if isinstance(expiration, timedelta)
-            else expiration
-        )
 
-    def create_token(self, user_id: int) -> Session:
-        """Issue a signed token that embeds the user id."""
-        self._assert_positive(user_id)
-        token = self.serializer.dumps({"uid": user_id})
-        return Session(token=token, user_id=user_id)
+def verify_session_token(raw: str, expected_hash: str) -> bool:
+    """Constant-time check that a raw token matches a stored hash."""
+    if not raw or not expected_hash:
+        return False
+    return secrets.compare_digest(_token_hash(raw), expected_hash)
 
-    def decode(self, token: str) -> Optional[int]:
-        """Return the user id encoded in the token, if it is valid and not expired."""
-        if not token:
-            return None
-        try:
-            payload = self.serializer.loads(token, max_age=self.expiration_seconds)
-            return int(payload.get("uid"))
-        except (BadData, ValueError):
-            return None
 
-    @staticmethod
-    def _assert_positive(value: Any) -> None:
-        if not isinstance(value, int) or value <= 0:
-            raise ValueError("user_id must be a positive integer")
+def hash_session_token(raw: str) -> str:
+    """Generate the hash for a raw session token."""
+    return _token_hash(raw)
+
+
+def generate_csrf_token() -> str:
+    """Return a random token suitable for double-submit CSRF protection."""
+    return secrets.token_urlsafe(32)
+
+
+def verify_csrf_token(cookie_token: str | None, form_token: str | None) -> bool:
+    """Compare CSRF tokens using constant time comparison."""
+    if not cookie_token or not form_token:
+        return False
+    return secrets.compare_digest(cookie_token, form_token)
+
+
+def session_expiration(max_age: timedelta | int = DEFAULT_MAX_AGE) -> int:
+    """Normalize expiration into integer seconds."""
+    return int(max_age.total_seconds() if isinstance(max_age, timedelta) else max_age)
+
+
 
 
 def hash_password(plain: str) -> str:
@@ -82,33 +76,52 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def cookie_settings(*, secure: bool | None = None) -> Dict[str, Any]:
-    """Standard cookie arguments that make session cookies httponly and samesite=lax."""
+def _resolve_secure_flag(secure: bool | None = None) -> bool:
+    """Determine if cookies should be marked secure."""
     env_secure = os.getenv("ROBYN_SECURE_COOKIES")
     forced_secure = None
     if env_secure is not None:
         forced_secure = env_secure.lower() in {"1", "true", "yes"}
-    secure_flag = (
-        secure
-        if secure is not None
-        else forced_secure if forced_secure is not None else False
-    )
+    if secure is not None:
+        return secure
+    if forced_secure is not None:
+        return forced_secure
+    env_mode = (os.getenv("ROBYN_ENV") or os.getenv("ENV") or "").lower()
+    return env_mode in {"prod", "production"}
+
+
+def cookie_settings(*, secure: bool | None = None) -> Dict[str, Any]:
+    """Standard cookie arguments that make session cookies httponly and samesite=lax."""
+    secure_flag = _resolve_secure_flag(secure)
     return {
-        "httponly": True,
-        "samesite": "lax",
+        "http_only": True,
+        "same_site": "lax",
         "secure": secure_flag,
         "max_age": DEFAULT_MAX_AGE,
         "path": "/",
     }
 
 
-def cookie_clear_settings() -> Dict[str, Any]:
+def csrf_cookie_settings(*, secure: bool | None = None) -> Dict[str, Any]:
+    """Cookie settings for CSRF tokens (not httponly)."""
+    secure_flag = _resolve_secure_flag(secure)
+    return {
+        "http_only": False,
+        "same_site": "lax",
+        "secure": secure_flag,
+        "max_age": DEFAULT_MAX_AGE,
+        "path": "/",
+    }
+
+
+def cookie_clear_settings(*, secure: bool | None = None) -> Dict[str, Any]:
     """Special cookie instructions required to immediately forget a session."""
+    secure_flag = _resolve_secure_flag(secure)
     return {
         "max_age": 0,
         "expires": "Thu, 01 Jan 1970 00:00:00 GMT",
         "path": "/",
-        "secure": False,
-        "httponly": True,
-        "samesite": "lax",
+        "secure": secure_flag,
+        "http_only": True,
+        "same_site": "lax",
     }

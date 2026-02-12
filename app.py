@@ -1,18 +1,26 @@
-from typing import Iterable, Optional
-from urllib.parse import urlencode
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Iterable, Optional, Tuple
+from urllib.parse import parse_qs, urlencode
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
 
 from auth import (
+    CSRF_COOKIE_NAME,
     SESSION_COOKIE_NAME,
-    SessionManager,
     cookie_clear_settings,
     cookie_settings,
+    csrf_cookie_settings,
+    generate_csrf_token,
+    generate_session_token,
+    hash_session_token,
     hash_password,
+    session_expiration,
+    verify_csrf_token,
     verify_password,
 )
-from database import Database, UserRecord
+from database import Database, SessionRecord, UserRecord
 import aiosqlite
 
 # Author: Daniel Neugent
@@ -21,7 +29,6 @@ app = Robyn(__file__)
 
 # Singletons used by every request
 db = Database()
-sessions = SessionManager()
 
 
 async def _ensure_database() -> None:
@@ -30,6 +37,13 @@ async def _ensure_database() -> None:
 
 
 app.startup_handler(_ensure_database)
+
+
+@dataclass
+class AuthContext:
+    user: Optional[UserRecord]
+    session: Optional[SessionRecord]
+    clear_cookie: bool
 
 
 def _get_cookie_value(request: Request, name: str) -> Optional[str]:
@@ -46,6 +60,72 @@ def _get_cookie_value(request: Request, name: str) -> Optional[str]:
     return None
 
 
+def _form_data(request: Request) -> dict[str, str]:
+    """Return form fields, including urlencoded fallback parsing for Robyn 0.77."""
+    native = request.form_data or {}
+    if native:
+        return {str(k): str(v) for k, v in native.items()}
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/x-www-form-urlencoded" not in content_type:
+        return {}
+    raw_body = request.body
+    if isinstance(raw_body, (bytes, bytearray)):
+        body_bytes = bytes(raw_body)
+    elif isinstance(raw_body, list):
+        body_bytes = bytes(raw_body)
+    elif isinstance(raw_body, str):
+        body_bytes = raw_body.encode("utf-8")
+    else:
+        return {}
+    parsed = parse_qs(
+        body_bytes.decode("utf-8", errors="replace"), keep_blank_values=True
+    )
+    return {key: values[0] if values else "" for key, values in parsed.items()}
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+
+def _is_expired(expires_at: str) -> bool:
+    try:
+        return datetime.fromisoformat(expires_at) <= datetime.utcnow()
+    except ValueError:
+        return True
+
+
+def _get_or_create_csrf_token(request: Request) -> Tuple[str, bool]:
+    token = _get_cookie_value(request, CSRF_COOKIE_NAME)
+    if token:
+        return token, False
+    return generate_csrf_token(), True
+
+
+def _set_csrf_cookie(response: Response, token: str) -> None:
+    response.set_cookie(CSRF_COOKIE_NAME, token, **csrf_cookie_settings())
+
+
+def _set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(SESSION_COOKIE_NAME, token, **cookie_settings())
+
+
+def _clear_session_cookie(response: Response) -> None:
+    response.set_cookie(SESSION_COOKIE_NAME, "", **cookie_clear_settings())
+
+
+def _apply_common_cookies(
+    response: Response,
+    *,
+    clear_session: bool = False,
+    csrf_token: Optional[str] = None,
+    set_csrf: bool = False,
+) -> None:
+    if clear_session:
+        _clear_session_cookie(response)
+    if set_csrf and csrf_token:
+        _set_csrf_cookie(response, csrf_token)
+
+
 def _html_response(body: str, *, status: int = 200) -> Response:
     """Wrap an HTML body inside a minimal Robyn response."""
     return Response(
@@ -55,18 +135,27 @@ def _html_response(body: str, *, status: int = 200) -> Response:
     )
 
 
-def _build_nav(user: Optional[UserRecord]) -> str:
+def _build_nav(user: Optional[UserRecord], csrf_token: Optional[str]) -> str:
     """Render the shared navigation bar shown at the top of every page."""
     links = ['<a href="/">Home</a>', '<a href="/public">Public</a>']
     if user:
+        logout_html = ""
+        if csrf_token:
+            logout_html = f"""
+                <form method="post" action="/logout" class="logout-form">
+                  <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
+                  <button type="submit">Log out</button>
+                </form>
+            """
         links.extend(
             [
                 '<a href="/dashboard">Dashboard</a>',
                 '<a href="/profile">Profile</a>',
-                '<a href="/logout">Log out</a>',
                 f'<span class="status">Signed in as {escape(user.username)}</span>',
             ]
         )
+        if logout_html:
+            links.append(logout_html)
     else:
         links.extend(
             [
@@ -94,11 +183,12 @@ def _page_template(
     title: str,
     body: str,
     user: Optional[UserRecord] = None,
+    csrf_token: Optional[str] = None,
     messages: Iterable[str] | None = None,
     message_kind: str = "info",
 ) -> str:
     """Wrap any page body inside a styled template with optional flash messages."""
-    nav = _build_nav(user)
+    nav = _build_nav(user, csrf_token)
     message_html = _message_block(messages or [], message_kind)
     return f"""
 <!doctype html>
@@ -109,7 +199,10 @@ def _page_template(
   <title>{escape(title)}</title>
   <style>
     body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1.5rem; }}
-    nav {{ margin-bottom: 1rem; }}
+    nav {{ margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }}
+    nav a {{ text-decoration: none; color: #0f62fe; font-weight: 600; }}
+    nav .logout-form {{ display: inline; margin: 0; }}
+    nav .logout-form button {{ width: auto; padding: 0.35rem 0.75rem; font-size: 0.9rem; }}
     .message {{ border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }}
     .message.info {{ background: #e8f0fe; border: 1px solid #bad1fe; }}
     .message.error {{ background: #ffe3e3; border: 1px solid #f5b7b7; }}
@@ -135,13 +228,29 @@ def _page_template(
 """
 
 
+async def _get_auth_context(request: Request) -> AuthContext:
+    """Resolve the current user and session from the cookie, if present."""
+    token = _get_cookie_value(request, SESSION_COOKIE_NAME)
+    if not token:
+        return AuthContext(user=None, session=None, clear_cookie=False)
+    token_hash = hash_session_token(token)
+    session = await db.fetch_session_by_token_hash(token_hash)
+    if not session:
+        return AuthContext(user=None, session=None, clear_cookie=True)
+    if session.revoked_at or _is_expired(session.expires_at):
+        if not session.revoked_at:
+            await db.revoke_session(session.id, _now_iso())
+        return AuthContext(user=None, session=None, clear_cookie=True)
+    user = await db.fetch_user_by_id(session.user_id)
+    if not user:
+        return AuthContext(user=None, session=None, clear_cookie=True)
+    await db.touch_session(session.id, _now_iso())
+    return AuthContext(user=user, session=session, clear_cookie=False)
+
+
 async def _current_user(request: Request) -> Optional[UserRecord]:
     """Resolve the current user from the session cookie (if present)."""
-    token = _get_cookie_value(request, SESSION_COOKIE_NAME)
-    user_id = sessions.decode(token or "")
-    if not user_id:
-        return None
-    return await db.fetch_user_by_id(user_id)
+    return (await _get_auth_context(request)).user
 
 
 def _redirect(location: str) -> Response:
@@ -169,16 +278,24 @@ def _normalize_redirect_path(raw: Optional[str], default: str = "/dashboard") ->
     return candidate
 
 
-async def _ensure_authenticated(request: Request) -> Response | UserRecord:
-    """Return the authenticated user or issue a login redirect if missing."""
-    user = await _current_user(request)
-    if user:
-        return user
+async def _ensure_authenticated(request: Request) -> Response | AuthContext:
+    """Return the authenticated context or issue a login redirect if missing."""
+    context = await _get_auth_context(request)
+    if context.user:
+        return context
     target = _normalize_redirect_path(request.url.path)
-    return _redirect_with_next("/login", query=urlencode({"next": target}))
+    response = _redirect_with_next("/login", query=urlencode({"next": target}))
+    if context.clear_cookie:
+        _clear_session_cookie(response)
+    return response
 
 
-def _login_form(next_path: str, *, messages: Iterable[str] | None = None) -> str:
+def _login_form(
+    next_path: str,
+    csrf_token: str,
+    *,
+    messages: Iterable[str] | None = None,
+) -> str:
     """Render the login form, optionally showing validation errors."""
     return f"""
     <section>
@@ -191,17 +308,21 @@ def _login_form(next_path: str, *, messages: Iterable[str] | None = None) -> str
         </label>
         <label>
           Password
-          <input type=\"password\" name=\"password\" required minlength=8>
-        </label>
-        <input type=\"hidden\" name=\"next\" value=\"{escape(next_path)}\">
-        <button type=\"submit\">Sign in</button>
+        <input type=\"password\" name=\"password\" required minlength=8>
+      </label>
+      <input type=\"hidden\" name=\"next\" value=\"{escape(next_path)}\">
+      <input type=\"hidden\" name=\"csrf_token\" value=\"{escape(csrf_token)}\">
+      <button type=\"submit\">Sign in</button>
       </form>
     </section>
     """
 
 
 def _register_form(
-    values: dict[str, str] | None = None, *, messages: Iterable[str] | None = None
+    csrf_token: str,
+    values: dict[str, str] | None = None,
+    *,
+    messages: Iterable[str] | None = None,
 ) -> str:
     """Return the registration form while preserving prior input and errors."""
     vals = values or {}
@@ -228,6 +349,7 @@ def _register_form(
           Confirm password
           <input type=\"password\" name=\"confirm_password\" required minlength=8>
         </label>
+        <input type=\"hidden\" name=\"csrf_token\" value=\"{escape(csrf_token)}\">
         <button type=\"submit\">Create account</button>
       </form>
     </section>
@@ -237,29 +359,57 @@ def _register_form(
 @app.get("/")
 async def home(request: Request) -> Response:
     """Landing page that always renders regardless of authentication state."""
-    user = await _current_user(request)
+    context = await _get_auth_context(request)
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
     body = """
     <section>
       <p>TagLens keeps every sensitive credential hashed and salted before hitting the database.</p>
       <p>Navigate using the links above; authenticated areas require a session cookie.</p>
     </section>
     """
-    return _html_response(
-        _page_template(title="TagLens", body=body, user=user),
+    response = _html_response(
+        _page_template(
+            title="TagLens",
+            body=body,
+            user=context.user,
+            csrf_token=csrf_token,
+        ),
     )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.get("/public")
 async def public_page(request: Request) -> Response:
     """Informational route accessible to unauthenticated visitors."""
-    user = await _current_user(request)
+    context = await _get_auth_context(request)
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
     body = """
     <section>
       <h2>Public area</h2>
       <p>Anyone can reach this without signing in.</p>
     </section>
     """
-    return _html_response(_page_template(title="Public", body=body, user=user))
+    response = _html_response(
+        _page_template(
+            title="Public",
+            body=body,
+            user=context.user,
+            csrf_token=csrf_token,
+        )
+    )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.get("/dashboard")
@@ -268,7 +418,9 @@ async def dashboard(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return auth
-    user = auth
+    context = auth
+    user = context.user
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
     body = f"""
     <section>
       <h2>Dashboard</h2>
@@ -276,7 +428,21 @@ async def dashboard(request: Request) -> Response:
       <p>Your account was created on {escape(user.created_at)} UTC.</p>
     </section>
     """
-    return _html_response(_page_template(title="Dashboard", body=body, user=user))
+    response = _html_response(
+        _page_template(
+            title="Dashboard",
+            body=body,
+            user=user,
+            csrf_token=csrf_token,
+        )
+    )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.get("/profile")
@@ -285,7 +451,9 @@ async def profile(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return auth
-    user = auth
+    context = auth
+    user = context.user
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
     body = f"""
     <section>
       <h2>Account details</h2>
@@ -296,87 +464,164 @@ async def profile(request: Request) -> Response:
       </dl>
     </section>
     """
-    return _html_response(_page_template(title="Profile", body=body, user=user))
+    response = _html_response(
+        _page_template(
+            title="Profile",
+            body=body,
+            user=user,
+            csrf_token=csrf_token,
+        )
+    )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.get("/login")
 async def login_get(request: Request) -> Response:
     """Render the login form and show flash messages if redirected from registration."""
-    user = await _current_user(request)
-    if user:
+    context = await _get_auth_context(request)
+    if context.user:
         return _redirect("/dashboard")
-    next_path = _normalize_redirect_path(request.query_params.get("next"))
+    next_path = _normalize_redirect_path(request.query_params.get("next", None))
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
     messages: list[str] = []
-    if request.query_params.get("registered") == "1":
+    if request.query_params.get("registered", None) == "1":
         messages.append("Account created. Please sign in.")
-    return _html_response(
+    response = _html_response(
         _page_template(
             title="Sign in",
-            body=_login_form(next_path, messages=messages),
+            body=_login_form(next_path, csrf_token, messages=messages),
             messages=None,
+            csrf_token=csrf_token,
         )
     )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.post("/login")
 async def login_post(request: Request) -> Response:
     """Validate credentials and issue a session token when authentication succeeds."""
-    form = request.form_data or {}
+    form = _form_data(request)
     email = (form.get("email") or "").strip().lower()
     password = form.get("password") or ""
     next_path = _normalize_redirect_path(form.get("next"))
+    csrf_cookie = _get_cookie_value(request, CSRF_COOKIE_NAME)
+    csrf_form = form.get("csrf_token")
     errors = []
+    csrf_valid = verify_csrf_token(csrf_cookie, csrf_form)
+    if not csrf_valid:
+        errors.append("CSRF validation failed. Please try again.")
     if not email:
         errors.append("Email is required.")
     if not password:
         errors.append("Password is required.")
     if errors:
-        return _html_response(
+        csrf_token = generate_csrf_token()
+        response = _html_response(
             _page_template(
                 title="Sign in",
-                body=_login_form(next_path, messages=errors),
+                body=_login_form(next_path, csrf_token, messages=errors),
                 messages=None,
-            )
+                csrf_token=csrf_token,
+            ),
+            status=400 if not csrf_valid else 200,
         )
+        _set_csrf_cookie(response, csrf_token)
+        return response
     user = await db.fetch_user_by_email(email)
     if not user or not verify_password(password, user.password_hash):
-        return _html_response(
+        csrf_token = generate_csrf_token()
+        response = _html_response(
             _page_template(
                 title="Sign in",
-                body=_login_form(next_path, messages=["Invalid credentials."]),
+                body=_login_form(
+                    next_path,
+                    csrf_token,
+                    messages=["Invalid credentials."],
+                ),
                 messages=None,
-            )
+                csrf_token=csrf_token,
+            ),
+            status=401,
         )
-    # The session manager always produces a signed token tied to the user id.
-    session = sessions.create_token(user.id)
+        _set_csrf_cookie(response, csrf_token)
+        return response
+    existing_token = _get_cookie_value(request, SESSION_COOKIE_NAME)
+    if existing_token:
+        await db.revoke_session_by_hash(hash_session_token(existing_token), _now_iso())
+    session_token = generate_session_token()
+    user_agent = request.headers.get("user-agent")
+    ip_addr = getattr(request, "ip_addr", None) or request.headers.get(
+        "x-forwarded-for"
+    )
+    expires_at = (
+        datetime.utcnow() + timedelta(seconds=session_expiration())
+    ).isoformat()
+    await db.create_session(
+        user_id=user.id,
+        token_hash=session_token.token_hash,
+        expires_at=expires_at,
+        user_agent=user_agent,
+        ip_address=ip_addr,
+    )
     redirect_destination = next_path if next_path.strip() else "/dashboard"
     response = _redirect(redirect_destination)
     # Store the session in a httponly cookie so browsers send it automatically.
-    response.set_cookie(SESSION_COOKIE_NAME, session.token, **cookie_settings())
+    _set_session_cookie(response, session_token.token)
+    csrf_token = generate_csrf_token()
+    _set_csrf_cookie(response, csrf_token)
     return response
 
 
 @app.get("/register")
 async def register_get(request: Request) -> Response:
     """Show the account creation form unless the user is already signed in."""
-    user = await _current_user(request)
-    if user:
+    context = await _get_auth_context(request)
+    if context.user:
         return _redirect("/dashboard")
-    return _html_response(
-        _page_template(title="Register", body=_register_form()),
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
+    response = _html_response(
+        _page_template(
+            title="Register",
+            body=_register_form(csrf_token),
+            csrf_token=csrf_token,
+        ),
     )
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+    return response
 
 
 @app.post("/register")
 async def register_post(request: Request) -> Response:
     """Process registration data, enforce validation, and persist new users."""
-    form = request.form_data or {}
+    form = _form_data(request)
     username = (form.get("username") or "").strip()
     email = (form.get("email") or "").strip().lower()
     password = form.get("password") or ""
     confirm = form.get("confirm_password") or ""
+    csrf_cookie = _get_cookie_value(request, CSRF_COOKIE_NAME)
+    csrf_form = form.get("csrf_token")
     # Keep track of every validation failure so we can redisplay them at once.
     errors = []
+    csrf_valid = verify_csrf_token(csrf_cookie, csrf_form)
+    if not csrf_valid:
+        errors.append("CSRF validation failed. Please try again.")
     if len(username) < 3:
         errors.append("Pick a username that is at least 3 characters.")
     if not email:
@@ -386,36 +631,59 @@ async def register_post(request: Request) -> Response:
     if password != confirm:
         errors.append("Password confirmation does not match.")
     if errors:
-        return _html_response(
+        csrf_token = generate_csrf_token()
+        response = _html_response(
             _page_template(
                 title="Register",
                 body=_register_form(
-                    {"username": username, "email": email}, messages=errors
+                    csrf_token,
+                    {"username": username, "email": email},
+                    messages=errors,
                 ),
-            )
+                csrf_token=csrf_token,
+            ),
+            status=400 if not csrf_valid else 200,
         )
+        _set_csrf_cookie(response, csrf_token)
+        return response
     try:
         password_hash = hash_password(password)
         await db.create_user(username, email, password_hash)
     except aiosqlite.IntegrityError:
         # The DB enforces uniqueness so a duplicate inserts will raise here.
         errors.append("That username or email is already registered.")
-        return _html_response(
+        csrf_token = generate_csrf_token()
+        response = _html_response(
             _page_template(
                 title="Register",
                 body=_register_form(
-                    {"username": username, "email": email}, messages=errors
+                    csrf_token,
+                    {"username": username, "email": email},
+                    messages=errors,
                 ),
+                csrf_token=csrf_token,
             )
         )
+        _set_csrf_cookie(response, csrf_token)
+        return response
     return _redirect_with_next("/login", query=urlencode({"registered": "1"}))
 
 
-@app.get("/logout")
+@app.post("/logout")
 async def logout(request: Request) -> Response:
-    """Clear the user's session cookie and return to the public landing page."""
+    """Revoke the session cookie and return to the public landing page."""
+    form = _form_data(request)
+    csrf_cookie = _get_cookie_value(request, CSRF_COOKIE_NAME)
+    csrf_form = form.get("csrf_token")
+    if not verify_csrf_token(csrf_cookie, csrf_form):
+        response = _redirect("/")
+        _clear_session_cookie(response)
+        return response
+    token = _get_cookie_value(request, SESSION_COOKIE_NAME)
+    if token:
+        await db.revoke_session_by_hash(hash_session_token(token), _now_iso())
     response = _redirect("/")
-    response.set_cookie(SESSION_COOKIE_NAME, "", **cookie_clear_settings())
+    _clear_session_cookie(response)
     return response
 
 
