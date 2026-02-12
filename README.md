@@ -9,7 +9,8 @@ This project is a small Robyn application that demonstrates a secure username/pa
 - SQLite stores user records with hashed-and-salted passwords using `passlib[bcrypt]`.
 - Auth-protected routes (`/dashboard`, `/profile`) redirect to `/login` when there is no session cookie.
 - Public routes (`/`, `/public`, `/register`, `/login`) remain open to everyone.
-- Session cookies are signed via `itsdangerous` and default to `httponly`, `samesite=lax`, and configurable `secure` mode.
+- Session cookies are opaque tokens stored server-side in SQLite and default to `httponly`, `samesite=lax`, and configurable `secure` mode.
+- CSRF protection uses the double-submit cookie pattern for HTML forms.
 - No SQL is interpolated directly; every database query is parameterized through `aiosqlite`.
 - HTML rendering escapes user supplied values with `markupsafe`.
 
@@ -23,14 +24,7 @@ This project is a small Robyn application that demonstrates a secure username/pa
    ```bash
    uv install -r requirements.txt requirements-dev.txt
    ```
-3. Export a fixed signing secret before starting the server. Without it, the app will generate a temporary secret and warn you on the console:
-   ```bash
-   export ROBYN_SECRET_KEY="$(python - <<'PY'
-import secrets
-print(secrets.token_urlsafe(32))
-PY")"
-   ```
-   Optionally set `ROBYN_SECURE_COOKIES=1` if you deploy behind HTTPS and want secure cookies.
+3. Optionally set `ROBYN_SECURE_COOKIES=1` if you deploy behind HTTPS and want secure cookies.
 4. Use the automated checks to ensure the code base compiles and is linted:
    ```bash
    ./scripts/check.sh
@@ -46,15 +40,16 @@ PY")"
 - `GET /` – landing page with the current authentication status.
 - `GET /public` – a publicly accessible page.
 - `GET /register` + `POST /register` – create a new username/email + password.
-- `GET /login` + `POST /login` – authenticate and receive a signed session cookie.
+- `GET /login` + `POST /login` – authenticate and receive a session cookie.
 - `GET /dashboard`, `GET /profile` – require an active session cookie and redirect to `/login` if missing.
-- `GET /logout` – clears the session cookie and sends you back to `/`.
+- `POST /logout` – revokes the session cookie and sends you back to `/`.
 
 ## Security notes
 - Every response that renders user-provided data escapes the values through `markupsafe.escape`.
 - Database calls use parameterized SQL (no string interpolation) with `aiosqlite`.
 - Password hashing uses `passlib`'s vetted `bcrypt` algorithm.
-- Sessions are signed and time-limited through `itsdangerous.URLSafeTimedSerializer`.
+- Sessions are stored in SQLite with hashed tokens and server-side revocation.
+- CSRF protection is enforced for login, registration, and logout.
 
 ## Development tips
 - The SQLite file lives under `data/users.db`; it is ignored by `.gitignore`.

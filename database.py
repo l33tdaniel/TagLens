@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -10,7 +11,17 @@ import aiosqlite
 
 # Author: Daniel Neugent
 
-DB_PATH = Path(__file__).resolve().parent / "data" / "users.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "users.db"
+
+
+def _resolve_db_path() -> Path:
+    env_path = os.getenv("TAGLENS_DB_PATH")
+    if env_path:
+        return Path(env_path)
+    return DEFAULT_DB_PATH
+
+
+DB_PATH = _resolve_db_path()
 
 
 @dataclass
@@ -20,6 +31,19 @@ class UserRecord:
     email: str
     password_hash: str
     created_at: str
+
+
+@dataclass
+class SessionRecord:
+    id: int
+    user_id: int
+    token_hash: str
+    created_at: str
+    expires_at: str
+    last_seen_at: str
+    user_agent: Optional[str]
+    ip_address: Optional[str]
+    revoked_at: Optional[str]
 
 
 class Database:
@@ -47,6 +71,20 @@ class Database:
                     email TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+                """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    user_agent TEXT,
+                    ip_address TEXT,
+                    revoked_at TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
                 """)
             await conn.commit()
@@ -102,3 +140,97 @@ class Database:
             password_hash=password_hash,
             created_at=created_at,
         )
+
+    async def create_session(
+        self,
+        *,
+        user_id: int,
+        token_hash: str,
+        expires_at: str,
+        user_agent: Optional[str] = None,
+        ip_address: Optional[str] = None,
+    ) -> SessionRecord:
+        """Insert a new session row for a user."""
+        created_at = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO sessions (
+                    user_id,
+                    token_hash,
+                    created_at,
+                    expires_at,
+                    last_seen_at,
+                    user_agent,
+                    ip_address,
+                    revoked_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    user_id,
+                    token_hash,
+                    created_at,
+                    expires_at,
+                    created_at,
+                    user_agent,
+                    ip_address,
+                ),
+            )
+            await conn.commit()
+            lastrowid = cursor.lastrowid
+        if lastrowid is None:
+            raise RuntimeError("Failed to read the inserted session ID.")
+        return SessionRecord(
+            id=int(lastrowid),
+            user_id=user_id,
+            token_hash=token_hash,
+            created_at=created_at,
+            expires_at=expires_at,
+            last_seen_at=created_at,
+            user_agent=user_agent,
+            ip_address=ip_address,
+            revoked_at=None,
+        )
+
+    async def fetch_session_by_token_hash(
+        self, token_hash: str
+    ) -> Optional[SessionRecord]:
+        """Retrieve a session by its hashed token value."""
+        row = await self.fetch_one(
+            """
+            SELECT id, user_id, token_hash, created_at, expires_at,
+                   last_seen_at, user_agent, ip_address, revoked_at
+            FROM sessions
+            WHERE token_hash = ?
+            """,
+            (token_hash,),
+        )
+        return SessionRecord(**row) if row else None
+
+    async def touch_session(self, session_id: int, last_seen_at: str) -> None:
+        """Update the session activity timestamp."""
+        async with self._connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET last_seen_at = ? WHERE id = ?",
+                (last_seen_at, session_id),
+            )
+            await conn.commit()
+
+    async def revoke_session(self, session_id: int, revoked_at: str) -> None:
+        """Mark a session as revoked."""
+        async with self._connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE id = ?",
+                (revoked_at, session_id),
+            )
+            await conn.commit()
+
+    async def revoke_session_by_hash(self, token_hash: str, revoked_at: str) -> None:
+        """Mark a session as revoked by its token hash."""
+        async with self._connection() as conn:
+            await conn.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE token_hash = ?",
+                (revoked_at, token_hash),
+            )
+            await conn.commit()
