@@ -22,6 +22,16 @@ class UserRecord:
     created_at: str
 
 
+@dataclass
+class ImageRecord:
+    id: int
+    user_id: Optional[int]
+    filename: str
+    faces_json: str
+    ocr_text: str
+    created_at: str
+
+
 class Database:
     """Lightweight wrapper around aiosqlite for user persistence."""
 
@@ -47,6 +57,17 @@ class Database:
                     email TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+                """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NULL,
+                    filename TEXT NOT NULL,
+                    faces_json TEXT NOT NULL,
+                    ocr_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
                 """)
             await conn.commit()
@@ -100,5 +121,32 @@ class Database:
             username=username,
             email=email.lower(),
             password_hash=password_hash,
+            created_at=created_at,
+        )
+
+    async def create_image_metadata(
+        self, filename: str, faces_json: str, ocr_text: str, user_id: Optional[int] = None
+    ) -> ImageRecord:
+        """Insert processed image metadata and return the constructed dataclass."""
+        created_at = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO images (user_id, filename, faces_json, ocr_text, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, filename, faces_json, ocr_text, created_at),
+            )
+            await conn.commit()
+            lastrowid = cursor.lastrowid
+        if lastrowid is None:
+            raise RuntimeError("Failed to read the inserted image ID.")
+        image_id = int(lastrowid)
+        return ImageRecord(
+            id=image_id,
+            user_id=user_id,
+            filename=filename,
+            faces_json=faces_json,
+            ocr_text=ocr_text,
             created_at=created_at,
         )

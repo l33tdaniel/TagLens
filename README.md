@@ -39,6 +39,12 @@ PY")"
    ```bash
    ROBYN_HOST=0.0.0.0 ROBYN_PORT=8000 ./start_server.sh
    ```
+### Running image metadata script (Windows)
+Activate your virtual environment first to ensure dependencies are available:
+```powershell
+.\.venv\Scripts\Activate.ps1
+python scripts\metadata.py "C:\\path\\to\\image.jpg"
+```
 
    By default `./start_server.sh` launches Robyn without `--dev` because the bundled reloader is currently crashing with `RuntimeError: threads can only be started once`. Set `DEV_MODE=1` (or `DEV_MODE=true`) if you need the hot-reload behavior and can tolerate the occasional `--dev` panic until the upstream issue is resolved.
 
@@ -60,3 +66,17 @@ PY")"
 - The SQLite file lives under `data/users.db`; it is ignored by `.gitignore`.
 - To reset the database, stop the server and delete `data/users.db` before restarting.
 - You can toggle secure cookies by setting `ROBYN_SECURE_COOKIES=1` in the environment (remember to run behind HTTPS when secure cookies are enabled).
+
+## Image Processing (Faces + OCR)
+- A standalone script at `scripts/metadata.py` extracts EXIF, captions, face boxes, and OCR text from images (including HEIC).
+- Install extra dependencies for this script using `arnav_requirements.txt`.
+
+### Windows OCR setup
+- OCR uses Tesseract; install it from: https://github.com/UB-Mannheim/tesseract/wiki
+- After installation, ensure `tesseract.exe` is in your `PATH` or set `pytesseract.pytesseract.tesseract_cmd` to the installed binary location.
+
+### Try it
+```bash
+python scripts/metadata.py
+```
+The script prints face bounding boxes and a preview of extracted text if Tesseract is available.
