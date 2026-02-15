@@ -1,0 +1,81 @@
+body {
+    margin: 0;
+    font-family: 'Segoe UI', sans-serif;
+    background: #fff7f0; /* light cream */
+    color: #333;
+}
+
+.navbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 40px;
+    background: #ff8c42; /* orange */
+    color: white;
+}
+
+.logo {
+    font-weight: bold;
+    font-size: 20px;
+}
+
+.user-menu {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid white;
+}
+
+.main-content {
+    display: flex;
+    justify-content: center;
+    margin-top: 80px;
+}
+
+.upload-card {
+    background: white;
+    padding: 40px;
+    border-radius: 14px;
+    width: 500px;
+    text-align: center;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+}
+
+.drop-zone {
+    margin-top: 25px;
+    padding: 40px;
+    border: 2px dashed #ff8c42;
+    border-radius: 12px;
+    background: #fff2e6;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.drop-zone:hover {
+    background: #ffe5d1;
+}
+
+button {
+    margin-top: 15px;
+    padding: 10px 20px;
+    background: #ff8c42;
+    border: none;
+    color: white;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: #ff7a2f;
+}
+
+#fileList {
+    margin-top: 20px;
+    font-size: 14px;
+}
