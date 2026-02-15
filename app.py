@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
+import json
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
@@ -454,24 +455,13 @@ async def profile(request: Request) -> Response:
     context = auth
     user = context.user
     csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    body = f"""
-    <section>
-      <h2>Account details</h2>
-      <dl>
-        <dt>Username</dt><dd>{escape(user.username)}</dd>
-        <dt>Email</dt><dd>{escape(user.email)}</dd>
-        <dt>Member since</dt><dd>{escape(user.created_at)} UTC</dd>
-      </dl>
-    </section>
-    """
-    response = _html_response(
-        _page_template(
-            title="Profile",
-            body=body,
-            user=user,
-            csrf_token=csrf_token,
-        )
-    )
+    with open("frontend/pages/user_profile/UserProfile.html", "r", encoding="utf-8") as f:
+        html = f.read()
+    
+    response = Response(status_code = 200,
+                        headers = {"content-type": "text/html"},
+                        description=html,)
+    
     _apply_common_cookies(
         response,
         clear_session=context.clear_cookie,

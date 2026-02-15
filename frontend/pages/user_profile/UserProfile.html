@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Profile</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            creamsicle: {
+              bg: '#fff7f0',
+              primary: '#ff8c42',
+              secondary: '#ff7a2f',
+              soft: '#ffe5d1'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- External JS -->
+  <script src="UserProfile.js" defer></script>
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col">
+
+  <div class="fixed left-6 top-1/2 -translate-y-1/2 
+            flex flex-col items-center gap-8">
+
+  <!-- Circle Item -->
+  <button class="w-12 h-12 rounded-full 
+                 border border-orange-200
+                 bg-white/60 backdrop-blur
+                 flex items-center justify-center
+                 hover:scale-105 transition">
+    📤
+  </button>
+
+  <button class="w-12 h-12 rounded-full 
+                 border border-orange-200
+                 bg-white/60 backdrop-blur
+                 flex items-center justify-center
+                 hover:scale-105 transition">
+    🖼️
+  </button>
+
+  <button class="w-12 h-12 rounded-full 
+                 border border-orange-200
+                 bg-white/60 backdrop-blur
+                 flex items-center justify-center
+                 hover:scale-105 transition">
+    🏷️
+  </button>
+
+  <button class="w-12 h-12 rounded-full 
+                 border border-orange-200
+                 bg-white/60 backdrop-blur
+                 flex items-center justify-center
+                 hover:scale-105 transition">
+    ⚙️
+  </button>
+
+</div>
+
+  <!-- Navbar -->
+  <header class="flex items-center justify-between px-10 py-6">
+
+  <!-- Left: Logo -->
+  <div class="flex items-center gap-4">
+    <div class="w-10 h-10 rounded-full 
+                border border-orange-200 
+                flex items-center justify-center font-semibold">
+      TL
+    </div>
+
+    <span class="text-lg font-medium tracking-tight">
+      Tag Lens
+    </span>
+  </div>
+
+  <!-- Center: Oval Nav -->
+  <nav class="flex items-center gap-4">
+
+    <button class="h-11 px-6 rounded-full
+                   border border-orange-200
+                   bg-white/50
+                   flex items-center
+                   text-sm font-medium
+                   hover:bg-orange-50 transition">
+      Upload
+    </button>
+
+    <button class="h-11 px-6 rounded-full
+                   border border-orange-200
+                   bg-white/50
+                   flex items-center
+                   text-sm font-medium
+                   hover:bg-orange-50 transition">
+      Gallery
+    </button>
+
+    <button class="h-11 px-6 rounded-full
+                   border border-orange-200
+                   bg-white/50
+                   flex items-center
+                   text-sm font-medium
+                   hover:bg-orange-50 transition">
+      Search
+    </button>
+
+  </nav>
+
+  <!-- Right: Profile -->
+  <div class="flex items-center gap-3">
+    <span class="text-sm text-gray-600">
+      Srihari
+    </span>
+    <img src="https://i.pravatar.cc/100"
+         class="w-9 h-9 rounded-full border border-orange-200" />
+  </div>
+
+</header>
+
+
+  <main class="flex-grow pl-32 pr-12 pt-20 pb-32">
+
+  <!-- Profile Metadata Card -->
+  <div class="max-w-6xl mx-auto mb-20">
+    <div class="bg-white/70 backdrop-blur 
+                border border-orange-300 
+                rounded-3xl p-10 shadow-sm">
+
+      <div class="flex items-center justify-between">
+
+        <!-- Left Side -->
+        <div class="flex items-center gap-6">
+
+          <img src="https://i.pravatar.cc/150"
+               class="w-20 h-20 rounded-full border border-orange-300" />
+
+          <div class="text-left">
+            <h2 id="username" class="text-2xl font-semibold text-gray-900">
+            </h2>
+
+            <p id="email" class="text-sm text-gray-500 mt-1">
+            </p>
+
+            <p id="created" class="text-xs text-gray-400 mt-2">
+            </p>
+          </div>
+
+        </div>
+
+        <!-- Right Side Stats -->
+        <div class="flex gap-12 text-center">
+
+          <div>
+            <p class="text-2xl font-semibold text-gray-900">24</p>
+            <p class="text-xs text-gray-500">Photos</p>
+          </div>
+
+          <div>
+            <p class="text-2xl font-semibold text-gray-900">12</p>
+            <p class="text-xs text-gray-500">Tags</p>
+          </div>
+
+          <div>
+            <p class="text-2xl font-semibold text-gray-900">3</p>
+            <p class="text-xs text-gray-500">Collections</p>
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- Gallery Section -->
+  <div class="max-w-6xl mx-auto px-10">
+
+    <h3 class="text-2xl font-semibold text-gray-900 mb-8">
+      Your Gallery
+    </h3>
+
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+
+      <div class="overflow-hidden border border-orange-200 bg-white">
+        <img src="https://picsum.photos/400"
+             class="w-full h-48 object-cover hover:scale-105 transition duration-300" />
+      </div>
+
+      <div class="overflow-hidden border border-orange-200 bg-white">
+        <img src="https://picsum.photos/401"
+             class="w-full h-48 object-cover hover:scale-105 transition duration-300" />
+      </div>
+
+      <div class="overflow-hidden border border-orange-200 bg-white">
+        <img src="https://picsum.photos/402"
+             class="w-full h-48 object-cover hover:scale-105 transition duration-300" />
+      </div>
+
+      <div class="overflow-hidden border border-orange-200 bg-white">
+        <img src="https://picsum.photos/403"
+             class="w-full h-48 object-cover hover:scale-105 transition duration-300" />
+      </div>
+
+    </div>
+
+  </div>
+
+</main>
+
+
+</body>
+</html>

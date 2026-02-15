@@ -14,3 +14,4 @@ data/*.db
 data/*.sqlite3
 .logs/
 *.log
+.vscode/
