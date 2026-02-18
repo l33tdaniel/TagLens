@@ -46,6 +46,16 @@ class SessionRecord:
     revoked_at: Optional[str]
 
 
+@dataclass
+class ImageRecord:
+    id: int
+    user_id: Optional[int]
+    filename: str
+    faces_json: str
+    ocr_text: str
+    created_at: str
+
+
 class Database:
     """Lightweight wrapper around aiosqlite for user persistence."""
 
@@ -64,7 +74,8 @@ class Database:
         """Create directories and ensure the users table exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connection() as conn:
-            await conn.execute("""
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
@@ -72,8 +83,10 @@ class Database:
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
-                """)
-            await conn.execute("""
+                """
+            )
+            await conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -86,7 +99,21 @@ class Database:
                     revoked_at TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
-                """)
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NULL,
+                    filename TEXT NOT NULL,
+                    faces_json TEXT NOT NULL,
+                    ocr_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                )
+                """
+            )
             await conn.commit()
 
     async def fetch_one(
@@ -191,6 +218,33 @@ class Database:
             user_agent=user_agent,
             ip_address=ip_address,
             revoked_at=None,
+        )
+
+    async def create_image_metadata(
+        self, filename: str, faces_json: str, ocr_text: str, user_id: Optional[int] = None
+    ) -> ImageRecord:
+        """Insert processed image metadata and return the constructed dataclass."""
+        created_at = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                """
+                INSERT INTO images (user_id, filename, faces_json, ocr_text, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user_id, filename, faces_json, ocr_text, created_at),
+            )
+            await conn.commit()
+            lastrowid = cursor.lastrowid
+        if lastrowid is None:
+            raise RuntimeError("Failed to read the inserted image ID.")
+        image_id = int(lastrowid)
+        return ImageRecord(
+            id=image_id,
+            user_id=user_id,
+            filename=filename,
+            faces_json=faces_json,
+            ocr_text=ocr_text,
+            created_at=created_at,
         )
 
     async def fetch_session_by_token_hash(
