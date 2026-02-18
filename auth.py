@@ -5,7 +5,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Dict
+from typing import Any, Dict
 
 from passlib.context import CryptContext
 
@@ -15,7 +15,12 @@ SESSION_COOKIE_NAME = "taglens_session"
 CSRF_COOKIE_NAME = "taglens_csrf"
 DEFAULT_MAX_AGE = 60 * 60 * 24  # 1 day
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Prefer Argon2 for new hashes; allow legacy PBKDF2/bcrypt verification.
+pwd_context = CryptContext(
+    schemes=["argon2", "pbkdf2_sha256", "bcrypt"],
+    default="argon2",
+    deprecated="auto",
+)
 
 
 @dataclass
@@ -73,7 +78,10 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Compare a plaintext password against the stored hash."""
-    return pwd_context.verify(plain, hashed)
+    try:
+        return pwd_context.verify(plain, hashed)
+    except Exception:
+        return False
 
 
 def _resolve_secure_flag(secure: bool | None = None) -> bool:

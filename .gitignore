@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 .env
 .venv*
+venv/
 env/
 dist/
 build/
@@ -14,4 +15,3 @@ data/*.db
 data/*.sqlite3
 .logs/
 *.log
-.vscode/

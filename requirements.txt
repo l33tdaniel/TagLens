@@ -2,5 +2,6 @@ robyn>=0.9
 uvicorn[standard]>=0.23
 passlib[bcrypt]>=1.7
 bcrypt<4.0
+argon2-cffi>=23.1
 aiosqlite>=0.20
 markupsafe>=2.1
