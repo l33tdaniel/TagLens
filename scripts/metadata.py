@@ -6,10 +6,11 @@ from geopy.geocoders import Nominatim # <--- New library
 from transformers import AutoModelForCausalLM
 import torch
 import time
+from database import *
 
 # Setup
 pillow_heif.register_heif_opener()
-geolocator = Nominatim(user_agent="TagLens")
+geolocator = Nominatim(user_agent="Omnivision/0.1 (arnav.jain@ku.edu)")
 if torch.cuda.is_available():
     device = "cuda"
 elif torch.backends.mps.is_available():
@@ -26,7 +27,7 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map=device,
 )
 
-def get_complete_metadata(path):
+def get_complete_metadata(path, curr):
     start = time.perf_counter()
     img = Image.open(path)
     end = time.perf_counter()
@@ -77,9 +78,11 @@ def get_complete_metadata(path):
 
         try:
             # This reaches out to OpenStreetMap to get the name
-            location_data = geolocator.reverse((lat, lon), language='en')
+            location_data = geolocator.reverse((lat, lon), language='en', zoom=14)
+            print(location_data.raw)
         except Exception as e:
             location_data = None
+            print(e)
     end = time.perf_counter()
     metadata_time = end-start
 
@@ -110,7 +113,29 @@ def get_complete_metadata(path):
     print(f"Time to get not gps data: {non_gps_time}")
     print(f"Time to get full data: {metadata_time}")
     print(f"Time to get caption: {caption_time}")
+    
+    metadata = dict()
+    metadata['filename'] = os.path.basename(path)
+    metadata['path'] = ""
+    metadata['size'] = file_size_mb
+    metadata['w'] = w
+    metadata['h'] = h
+    metadata['make'] = phone_make
+    metadata['model'] = phone_model
+    metadata['date'] = date
+    metadata['iso'] = iso
+    metadata['f_stop'] = f_stop
+    metadata['shutter'] = shutter
+    metadata['focal'] = focal
+    metadata['lat'] = lat_lon_str.split(',')[0]
+    metadata['lon'] = lat_lon_str.split(',')[1]
+    # metadata['loc_desc'] = , loc_state, loc_country, metadata['caption']
 
 
 # Run it
-get_complete_metadata('test_images/photo.HEIC')
+# curr = init_db()
+curr = None
+get_complete_metadata('test_images\\photo.heif', curr)
+get_complete_metadata('test_images\\image.heif', curr)
+
+
