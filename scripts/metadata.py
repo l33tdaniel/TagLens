@@ -7,7 +7,7 @@ import sys
 import numpy as np
 import cv2
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageFile
 from PIL.ExifTags import TAGS, GPSTAGS
 import pillow_heif
 from geopy.geocoders import Nominatim # <--- New library
@@ -17,6 +17,7 @@ import time
 from database_helper import *
 
 import easyocr
+import numpy as np
 
 # Setup
 pillow_heif.register_heif_opener()
@@ -48,6 +49,7 @@ if AutoModelForCausalLM and torch:
         print(f"Captioning model unavailable; skipping captions: {e}")
 
 reader = easyocr.Reader(['en'], gpu=True)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
@@ -105,11 +107,18 @@ def extract_ocr(img: Image.Image) -> Dict[str, Any]:
         print(e)
     return result
 
-def ocr2(path):
+def ocr2(img):
     result = None
+        
+    # 3. Strip away any weird transparency layers (forces standard RGB)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+
     try:
         # 2. Read the text
-        text_list = reader.readtext(path, detail=0)
+        img_array = np.array(img)
+        
+        text_list = reader.readtext(img_array, detail=0)
         result = " ".join(text_list).strip()
         
     except Exception as e:
@@ -156,7 +165,7 @@ def get_complete_metadata(path, conn, user_id):
     lat = None
     lon = None
 
-    if gps_info:
+    if gps_info and len(gps_info) > 1:
         raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
         lat = to_deci(raw_gps.get("GPSLatitude"))
         lon = to_deci(raw_gps.get("GPSLongitude"))
@@ -181,11 +190,6 @@ def get_complete_metadata(path, conn, user_id):
     # face_time = end - start
 
 
-    # OCR
-    start = time.perf_counter()
-    ocr = ocr2(path)
-    end = time.perf_counter()
-    ocr_time = end - start
 
     # Captioning
     output_caption = None
@@ -203,19 +207,24 @@ def get_complete_metadata(path, conn, user_id):
         end = time.perf_counter()
         caption_time = end-start
     
+    # OCR
+    start = time.perf_counter()
+    ocr = ocr2(img)
+    end = time.perf_counter()
+    ocr_time = end - start
 
     # --- FINAL OUTPUT ---
-    print(f"\n{'='*40}")
-    print(f"FILE:        {os.path.basename(path)}")
-    print(f"SIZE:        {file_size_mb:.2f} MB")
-    print(f"QUALITY:     {w}x{h} ({mp:.2f}MP)")
-    print(f"DEVICE:      {phone_make} {phone_model}")
-    print(f"DATE:        {date}")
-    print(f"SETTINGS:    ƒ/{f_stop} | {shutter}s | {focal}mm | ISO {iso}")
-    print(f"COORDS:      {lat_lon_str}")
-    print(f"LOCATION:    {location_data}")
-    if output_caption is not None:
-        print(f"CAPTION:     {output_caption}")
+    # print(f"\n{'='*40}")
+    # print(f"FILE:        {os.path.basename(path)}")
+    # print(f"SIZE:        {file_size_mb:.2f} MB")
+    # print(f"QUALITY:     {w}x{h} ({mp:.2f}MP)")
+    # print(f"DEVICE:      {phone_make} {phone_model}")
+    # print(f"DATE:        {date}")
+    # print(f"SETTINGS:    ƒ/{f_stop} | {shutter}s | {focal}mm | ISO {iso}")
+    # print(f"COORDS:      {lat_lon_str}")
+    # print(f"LOCATION:    {location_data}")
+    # if output_caption is not None:
+    #     print(f"CAPTION:     {output_caption}")
     # Faces summary
     # print(f"FACES:       {len(faces)} detected")
     # if faces:
@@ -227,16 +236,16 @@ def get_complete_metadata(path, conn, user_id):
     # print(ocr)
     # if ocr.get("text"):
     #     preview = (ocr["text"][:180] + "...") if len(ocr["text"]) > 180 else ocr["text"]
-    print(f"OCR TEXT:    {ocr}")
-    print(f"{'='*40}\n")
+    # print(f"OCR TEXT:    {ocr}")
+    # print(f"{'='*40}\n")
 
 
-    print(f"Time to open: {open_time}")
-    print(f"Time to get not gps data: {non_gps_time}")
-    print(f"Time to get full data: {gps_time}")
-    # print(f"Time to detect faces: {face_time}")
-    print(f"Time to extract OCR: {ocr_time}")
-    print(f"Time to get caption: {caption_time}")
+    # print(f"Time to open: {open_time}")
+    # print(f"Time to get not gps data: {non_gps_time}")
+    # print(f"Time to get full data: {gps_time}")
+    # # print(f"Time to detect faces: {face_time}")
+    # print(f"Time to extract OCR: {ocr_time}")
+    # print(f"Time to get caption: {caption_time}")
 
     
     metadata = dict()
@@ -287,10 +296,12 @@ def get_complete_metadata(path, conn, user_id):
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else 'test_images\\img.jpg'
+    target = sys.argv[1] if len(sys.argv) > 1 else r'D:\Photos\test\Photos from 2015\gettyimages-493656728.jpg'
     curr = init_db()
     if not os.path.exists(target):
         print(f"Input image not found: {target}")
     else:
-        get_complete_metadata(target, curr, 1)
-        download_from_b2("1/6.jpg", "test_images\\test.jpg")
+        get_complete_metadata(r"D:\Photos\test\Photos from 2025\IMG_5156.JPG", curr, 1)
+        # get_complete_metadata(r"test_images\IMG_8700.heif", curr, 1)
+        # get_complete_metadata(target, curr, 1)
+        # download_from_b2("1/1.heif", "test_images\\pain.heif")

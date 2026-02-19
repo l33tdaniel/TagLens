@@ -13,20 +13,19 @@ BUCKET_NAME = os.getenv("BUCKET_NAME")
 
 LOCAL_FILE_PATH = "test_images\\IMG_8700.heif" # File on your computer
 B2_FILE_NAME = "test/image.heif"    # What you want to call it in the cloud
-# ---------------------------------------------------------
+
+
+# 1. Initialize the API
+info = InMemoryAccountInfo()
+b2_api = B2Api(info)
+
+# 2. Authorize
+b2_api.authorize_account("production", KEY_ID, APP_KEY)
+# 3. Get the Bucket
+bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
 
 def upload_to_b2(local_path, b2_name):
     try:
-        # 1. Initialize the API
-        info = InMemoryAccountInfo()
-        b2_api = B2Api(info)
-
-        # 2. Authorize
-        b2_api.authorize_account("production", KEY_ID, APP_KEY)
-
-        # 3. Get the Bucket
-        bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
-
         # 4. Upload the File
         file_info = bucket.upload_local_file(
             local_file=local_path,
@@ -47,11 +46,6 @@ def upload_to_b2(local_path, b2_name):
 # TEMP
 def download_from_b2(b2_file_path, local_save_path):
     print(f"Connecting to Backblaze to find: {b2_file_path}...")
-
-    info = InMemoryAccountInfo()
-    b2_api = B2Api(info)
-    b2_api.authorize_account("production", KEY_ID, APP_KEY)
-    bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
 
     try:
         # 1. Ensure the folder exists locally
