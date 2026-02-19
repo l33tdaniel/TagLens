@@ -35,6 +35,8 @@ import aiosqlite
 app = Robyn(__file__)
 logger = logging.getLogger(__name__)
 
+app.static("/static", "frontend/static")
+
 # Singletons used by every request
 db = Database()
 
@@ -546,6 +548,36 @@ async def dashboard(request: Request) -> Response:
         set_csrf=set_csrf,
     )
     return response
+
+@app.get("/api/profile")
+async def profile_data(request):
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return auth
+
+    context = auth
+    user = context.user
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
+
+    response = Response(
+        status_code=200,
+        headers={"Content-Type": "application/json"},
+        description=json.dumps({
+            "username": user.username,
+            "email": user.email,
+            "created_at": str(user.created_at)
+        })
+    )
+
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+
+    return response
+
 
 
 @app.get("/profile")
