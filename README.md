@@ -66,12 +66,12 @@ python scripts\metadata.py "C:\\path\\to\\image.jpg"
 - A standalone script at `scripts/metadata.py` extracts EXIF, captions, face boxes, and OCR text from images (including HEIC).
 - Install extra dependencies for this script using `arnav_requirements.txt`.
 
-### Windows OCR setup
-- OCR uses Tesseract; install it from: https://github.com/UB-Mannheim/tesseract/wiki
-- After installation, ensure `tesseract.exe` is in your `PATH` or set `pytesseract.pytesseract.tesseract_cmd` to the installed binary location.
+### OCR setup
+- OCR uses EasyOCR, which is automatically installed via `arnav_requirements.txt`.
+- No additional system dependencies required.
 
 ### Try it
 ```bash
 python scripts/metadata.py
 ```
-The script prints face bounding boxes and a preview of extracted text if Tesseract is available.
+The script prints face bounding boxes and extracted text from the image.

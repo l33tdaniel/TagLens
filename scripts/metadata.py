@@ -1,19 +1,16 @@
 import os
 import time
 from typing import Any, Dict, List
-from pathlib import Path
 import sys
 
 import numpy as np
 import cv2
-import pytesseract
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 import pillow_heif
-from geopy.geocoders import Nominatim # <--- New library
+from geopy.geocoders import Nominatim
 from transformers import AutoModelForCausalLM
 import torch
-import time
 from database_helper import *
 
 import easyocr
@@ -29,11 +26,6 @@ else:
     device = "cpu"
 
 print(f"Using device: {device}")
-
-if os.name == "nt":
-    _tess_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-    if os.path.exists(_tess_default):
-        pytesseract.pytesseract.tesseract_cmd = _tess_default
 
 model = None
 if AutoModelForCausalLM and torch:
@@ -66,44 +58,43 @@ def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
     return [{"x": int(x), "y": int(y), "w": int(w), "h": int(h)} for (x, y, w, h) in faces]
 
 
-def extract_ocr(img: Image.Image) -> Dict[str, Any]:
-    """Extract OCR text and bounding boxes from image
-    Returns dict with keys: text (str), boxes (List[Dict]), raw (dict), available (bool).
+def extract_ocr(path):
+    """Extract OCR text and bounding boxes using easyocr.
+    Returns text string and list of bounding boxes.
     """
-    result: Dict[str, Any] = {"text": "", "boxes": [], "raw": {}, "available": True}
+    text = ""
+    boxes = []
     try:
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config='--psm 11')
-        test = pytesseract.image_to_string(img, config='--psm 11')
-        result["raw"] = data
-        print(result)
-        print(test)
-        lines: List[str] = []
-        boxes: List[Dict[str, int]] = []
-        n = len(data.get("text", []))
-        for i in range(n):
-            conf = int(data.get("conf", ["-1"])[i]) if data.get("conf") else -1
-            txt = data.get("text", [""])[i]
-            if txt and conf >= 60:  # filter low-confidence tokens
-                lines.append(txt)
-                boxes.append(
-                    {
-                        "x": int(data.get("left", [0])[i]),
-                        "y": int(data.get("top", [0])[i]),
-                        "w": int(data.get("width", [0])[i]),
-                        "h": int(data.get("height", [0])[i]),
-                        "conf": conf,
-                    }
-                )
-        result["text"] = " ".join(lines).strip()
-        result["boxes"] = boxes
-    except (pytesseract.TesseractNotFoundError, OSError) as e:
-        # Tesseract binary not found on system; mark unavailable gracefully
-        result["available"] = False
-        result["text"] = ""
-        result["boxes"] = []
-        result["raw"] = {"error": str(e)}
-        print(e)
-    return result
+        # Read text with detailed bounding box info
+        results = reader.readtext(path)
+        text_list = []
+        
+        for detection in results:
+            bbox, text_content, confidence = detection
+            text_list.append(text_content)
+            
+            # Convert bbox (4 corner points) to x, y, w, h format
+            x_coords = [point[0] for point in bbox]
+            y_coords = [point[1] for point in bbox]
+            x = min(x_coords)
+            y = min(y_coords)
+            w = max(x_coords) - x
+            h = max(y_coords) - y
+            
+            boxes.append({
+                "x": int(x),
+                "y": int(y),
+                "w": int(w),
+                "h": int(h),
+                "conf": float(confidence)
+            })
+        
+        text = " ".join(text_list).strip()
+        
+    except Exception as e:
+        print(f"OCR error: {e}")
+    
+    return text, boxes
 
 def ocr2(path):
     result = None
@@ -115,6 +106,10 @@ def ocr2(path):
     except Exception as e:
         print(f"OCR error {e}")
     return result
+
+# Helper func
+def to_deci(val):
+    return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
 
 # Helper func
 def to_deci(val):
@@ -183,6 +178,7 @@ def get_complete_metadata(path, conn, user_id):
 
     # OCR
     start = time.perf_counter()
+    ocr_text, ocr_boxes = extract_ocr(path)
     ocr = ocr2(path)
     end = time.perf_counter()
     ocr_time = end - start
@@ -222,12 +218,9 @@ def get_complete_metadata(path, conn, user_id):
     #     print("FACE BOXES:  " + ", ".join([f"(x={f['x']}, y={f['y']}, w={f['w']}, h={f['h']})" for f in faces]))
     
     # OCR summary
-    # ocr_status = "available" if ocr.get("available", True) else "not available"
-    # print(f"OCR:         {ocr_status}; {len(ocr.get('boxes', []))} tokens")
-    # print(ocr)
-    # if ocr.get("text"):
-    #     preview = (ocr["text"][:180] + "...") if len(ocr["text"]) > 180 else ocr["text"]
-    print(f"OCR TEXT:    {ocr}")
+    print(f"OCR2 TEXT:    {ocr}")
+    print(f"OCR TEXT:    {ocr_text}")
+    print(f"OCR BOXES:   {len(ocr_boxes)} detected")
     print(f"{'='*40}\n")
 
 
@@ -269,19 +262,11 @@ def get_complete_metadata(path, conn, user_id):
  
     metadata['caption'] = output_caption['caption']
     metadata['ocr'] = ocr
+    metadata['ocr_text'] = ocr_text
+    metadata['ocr_boxes'] = ocr_boxes
+    #metadata['faces'] = faces
 
     metadata["user_id"] = user_id
-
-    # # results to the SQLite db
-    # try:
-    #     db = Database()
-    #     asyncio.run(db.initialize())
-    #     faces_json = json.dumps(faces)
-    #     filename = os.path.basename(path)
-    #     saved = asyncio.run(db.create_image_metadata(filename, faces_json, ocr.get("text", "")))
-    #     print(f"Saved image metadata to DB: id={saved.id} file={saved.filename}")
-    # except Exception as e:
-    #     print(f"Warning: failed to save image metadata: {e}")
 
     save_photo_to_db(conn, metadata)
 
