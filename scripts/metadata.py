@@ -294,6 +294,36 @@ def get_complete_metadata(path, conn, user_id):
 
     save_photo_to_db(conn, metadata)
 
+def handle_video(path, conn, user_id):
+    start = time.perf_counter()
+    
+    # 1. Get basic file metadata
+    file_size_mb = os.path.getsize(path) / (1024 * 1024)
+    filename = os.path.basename(path)
+    
+    # 2. Package the metadata dictionary
+    # Keeping this strictly to the basics per your DB requirements:
+    # user_id, filepath, size, and filename (for B2 upload extension).
+    metadata = {
+        'filename': filename,
+        'filepath': path,
+        'size': file_size_mb,
+        'user_id': user_id
+    }
+    
+    end = time.perf_counter()
+    process_time = end - start
+    
+    # --- FINAL OUTPUT ---
+    # print(f"\n{'='*40}")
+    # print(f"FILE:        {filename}")
+    # print(f"SIZE:        {file_size_mb:.2f} MB")
+    # print(f"TYPE:        Video (Minimal Metadata)")
+    # print(f"{'='*40}\n")
+    # print(f"Time to process video: {process_time:.5f}s")
+    
+    # 3. Hand off to the SQLite DB
+    save_video_to_db(conn, metadata)
 
 if __name__ == "__main__":
     target = sys.argv[1] if len(sys.argv) > 1 else r'D:\Photos\test\Photos from 2015\gettyimages-493656728.jpg'
