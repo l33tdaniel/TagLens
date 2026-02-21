@@ -2,6 +2,7 @@ from metadata import *
 from pathlib import Path
 import time
 from upload import *
+from database_test import *
 
 
 def process_all_images(start_directory: str, conn, user_id):
@@ -9,6 +10,8 @@ def process_all_images(start_directory: str, conn, user_id):
     Recursively finds all images in a directory and its subdirectories,
     then runs a function on each one.
     """
+
+    done = check_db_filepath()
     
     valid_extensions = {
         '.jpg', '.jpeg', '.png', '.heic', '.heif', 
@@ -40,13 +43,25 @@ def process_all_images(start_directory: str, conn, user_id):
             str_path = str(file_path)
             ext = file_path.suffix.lower()
 
+            if str_path in done:
+                continue
+
             if ext in valid_extensions:
-                print(f"Found Image: {str_path}")
+                try:
+                    print(f"Found Image: {str_path}")
+                except UnicodeEncodeError:
+                    print("Unicode error")
+                    print(f"Found Image: {repr(str_path)}")
+
                 get_complete_metadata(str_path, conn, user_id)
                 image_count += 1
-                
+
             elif ext in valid_video_extensions:
-                print(f"Found Video: {str_path}")
+                try:
+                    print(f"Found video: {str_path}")
+                except UnicodeEncodeError:
+                    print("Unicode error")
+                    print(f"Found video: {repr(str_path)}")
                 handle_video(str_path, conn, user_id)
                 video_count += 1
             
@@ -69,7 +84,6 @@ if __name__ == "__main__":
 
     
     start = time.time()
-    process_all_images(f1, conn, 123)
     process_all_images(f2, conn, 123)
     end = time.time()
     

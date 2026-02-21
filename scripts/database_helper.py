@@ -155,7 +155,11 @@ def save_photo_to_db(conn, metadata):
     )
 
     conn.commit()
-    print(f"Stored Photo: {metadata['filepath']} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}")
+    try:
+        print(f"Stored Photo: {metadata['filepath']} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}")
+    except UnicodeEncodeError:
+        print("UTF Error")
+        print(f"Stored Photo: {repr(metadata['filepath'])} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}")
 
 
 def save_video_to_db(conn, metadata):
@@ -187,4 +191,8 @@ def save_video_to_db(conn, metadata):
     # Note: No embedding or vector search logic here.
 
     conn.commit()
-    print(f"Stored Video: {metadata['filepath']} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}")
+    try:
+        print(f"Stored Video: {metadata['filepath']} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}")
+    except UnicodeEncodeError:
+        print("UTF Error")
+        print(f"Stored Video: {repr(metadata['filepath'])} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}")

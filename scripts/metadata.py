@@ -18,6 +18,7 @@ from database_helper import *
 
 import easyocr
 import numpy as np
+import math
 
 # Setup
 pillow_heif.register_heif_opener()
@@ -165,21 +166,31 @@ def get_complete_metadata(path, conn, user_id):
     lat = None
     lon = None
 
+    # print(gps_info)
     if gps_info and len(gps_info) > 1:
         raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
-        lat = to_deci(raw_gps.get("GPSLatitude"))
-        lon = to_deci(raw_gps.get("GPSLongitude"))
 
-        if raw_gps.get("GPSLatitudeRef") == "S": lat = -lat
-        if raw_gps.get("GPSLongitudeRef") == "W": lon = -lon
-        
-        lat_lon_str = f"{lat}, {lon}"
+        lat = raw_gps.get("GPSLatitude")
+        lon = raw_gps.get("GPSLongitude")
         try:
-            # This reaches out to OpenStreetMap to get the name
-            location_data = geolocator.reverse((lat, lon), language='en')
-        except Exception as e:
-            location_data = None
-            print(e)
+            if lat and lon:
+                lat = to_deci(lat)
+                lon = to_deci(lon)
+
+                if raw_gps.get("GPSLatitudeRef") == "S": lat = -lat
+                if raw_gps.get("GPSLongitudeRef") == "W": lon = -lon
+                
+                lat_lon_str = f"{lat}, {lon}"
+                try:
+                    # This reaches out to OpenStreetMap to get the name
+                    location_data = geolocator.reverse((lat, lon), language='en')
+                except Exception as e:
+                    location_data = None
+                    print(f"Location Error: {e}")
+        except ZeroDivisionError:
+            lat = None
+            lon = None
+
     end = time.perf_counter()
     gps_time = end-start
 
@@ -202,7 +213,7 @@ def get_complete_metadata(path, conn, user_id):
                 length="short",
             )
         except Exception as e:
-            print(f"Captioning failed: {e}")
+            print(f"Captioning Error: {e}")
             output_caption = None
         end = time.perf_counter()
         caption_time = end-start
@@ -264,17 +275,17 @@ def get_complete_metadata(path, conn, user_id):
     metadata['lat'] = lat
     metadata['lon'] = lon
     # CHANGE THIS LATER
+    metadata['loc_description'] = None
+    metadata['loc_city'] = None
+    metadata['loc_state'] = None
+    metadata['loc_country'] = None
     if location_data:
         loc = str(location_data).split(', ')
-        metadata['loc_description'] = " ".join(loc[:-3])
-        metadata['loc_city'] = loc[-3]
-        metadata['loc_state'] = loc[-2]
-        metadata['loc_country'] = loc[-1]
-    else:
-        metadata['loc_description'] = None
-        metadata['loc_city'] = None
-        metadata['loc_state'] = None
-        metadata['loc_country'] = None
+        if len(loc) >= 3:
+            metadata['loc_description'] = " ".join(loc[:-3])
+            metadata['loc_city'] = loc[-3]
+            metadata['loc_state'] = loc[-2]
+            metadata['loc_country'] = loc[-1]
  
     metadata['caption'] = output_caption['caption']
     metadata['ocr'] = ocr
@@ -292,6 +303,7 @@ def get_complete_metadata(path, conn, user_id):
     # except Exception as e:
     #     print(f"Warning: failed to save image metadata: {e}")
 
+    # print(metadata)
     save_photo_to_db(conn, metadata)
 
 def handle_video(path, conn, user_id):
@@ -326,12 +338,12 @@ def handle_video(path, conn, user_id):
     save_video_to_db(conn, metadata)
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else r'D:\Photos\test\Photos from 2015\gettyimages-493656728.jpg'
+    target = sys.argv[1] if len(sys.argv) > 1 else r'test_images\IMG_8700.heif'
     curr = init_db()
     if not os.path.exists(target):
         print(f"Input image not found: {target}")
     else:
-        get_complete_metadata(r"D:\Photos\test\Photos from 2025\IMG_5156.JPG", curr, 1)
-        # get_complete_metadata(r"test_images\IMG_8700.heif", curr, 1)
-        # get_complete_metadata(target, curr, 1)
+        get_complete_metadata(r"D:\Photos\takeout-20260212T234250Z-3-001\Takeout\Google Photos\Photos from 2020\IMG_3301.JPG", curr, 1)
+        get_complete_metadata(r"D:\Photos\takeout-20260212T234250Z-3-001\Takeout\Google Photos\Photos from 2021\IMG_1598.WEBP", curr, 1)
+        get_complete_metadata(target, curr, 1)
         # download_from_b2("1/1.heif", "test_images\\pain.heif")
