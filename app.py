@@ -2,7 +2,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
+from urllib import error as urllib_error, request as urllib_request
+import base64
 import json
+import os
+import asyncio
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
@@ -82,6 +86,28 @@ def _form_data(request: Request) -> dict[str, str]:
         body_bytes.decode("utf-8", errors="replace"), keep_blank_values=True
     )
     return {key: values[0] if values else "" for key, values in parsed.items()}
+
+
+def _raw_body_bytes(request: Request) -> bytes:
+    raw_body = request.body
+    if isinstance(raw_body, (bytes, bytearray)):
+        return bytes(raw_body)
+    if isinstance(raw_body, list):
+        return bytes(raw_body)
+    if isinstance(raw_body, str):
+        return raw_body.encode("utf-8")
+    return b""
+
+
+def _json_data(request: Request) -> dict:
+    body = _raw_body_bytes(request)
+    if not body:
+        return {}
+    try:
+        parsed = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _now_iso() -> str:
@@ -261,6 +287,57 @@ def _redirect(location: str) -> Response:
         headers={"location": location},
         description="",
     )
+
+
+def _json_response(payload: dict, *, status: int = 200) -> Response:
+    return Response(
+        status_code=status,
+        headers={"content-type": "application/json; charset=utf-8"},
+        description=json.dumps(payload),
+    )
+
+
+def _ollama_endpoint() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def _ollama_model() -> str:
+    return os.getenv("OLLAMA_MODEL", "llava")
+
+
+def _generate_image_description_with_ollama(
+    image_bytes: bytes,
+    *,
+    filename: str,
+) -> str:
+    endpoint = f"{_ollama_endpoint()}/api/generate"
+    payload = {
+        "model": _ollama_model(),
+        "prompt": (
+            "You are describing a user photo for search and organization. "
+            "Write 1-2 concise sentences with the key visible subjects, setting, and notable details."
+        ),
+        "stream": False,
+        "images": [base64.b64encode(image_bytes).decode("utf-8")],
+    }
+    req = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    description = (parsed.get("response") or "").strip()
+    if not description:
+        return ""
+    return f"{description}"
 
 
 def _redirect_with_next(path: str, *, query: Optional[str] = None) -> Response:
@@ -469,6 +546,85 @@ async def profile(request: Request) -> Response:
         set_csrf=set_csrf,
     )
     return response
+
+
+@app.get("/UserProfile.js")
+async def profile_js(_: Request) -> Response:
+    with open("frontend/pages/user_profile/Userprofile.js", "r", encoding="utf-8") as f:
+        content = f.read()
+    return Response(
+        status_code=200,
+        headers={"content-type": "application/javascript; charset=utf-8"},
+        description=content,
+    )
+
+
+@app.get("/api/profile")
+async def profile_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    user = auth.user
+    images = await db.list_images_for_user(user.id)
+    return _json_response(
+        {
+            "username": user.username,
+            "email": user.email,
+            "created_at": user.created_at,
+            "photos": [
+                {
+                    "id": record.id,
+                    "filename": record.filename,
+                    "created_at": record.created_at,
+                    "description": record.ai_description,
+                    "ocr_text": record.ocr_text,
+                }
+                for record in images
+            ],
+        }
+    )
+
+
+@app.post("/api/photos")
+async def upload_photo_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    payload = _json_data(request)
+    filename = str(payload.get("filename", "")).strip()
+    image_base64 = str(payload.get("image_base64", "")).strip()
+    if not filename or not image_base64:
+        return _json_response(
+            {"error": "filename and image_base64 are required"},
+            status=400,
+        )
+    try:
+        image_bytes = base64.b64decode(image_base64, validate=True)
+    except (ValueError, TypeError):
+        return _json_response({"error": "invalid image_base64 payload"}, status=400)
+    if not image_bytes:
+        return _json_response({"error": "empty image payload"}, status=400)
+    description = await asyncio.to_thread(
+        _generate_image_description_with_ollama,
+        image_bytes,
+        filename=filename,
+    )
+    saved = await db.create_image_metadata(
+        filename=filename,
+        faces_json="[]",
+        ocr_text="",
+        user_id=auth.user.id,
+        ai_description=description,
+    )
+    return _json_response(
+        {
+            "id": saved.id,
+            "filename": saved.filename,
+            "created_at": saved.created_at,
+            "description": saved.ai_description,
+        },
+        status=201,
+    )
 
 
 @app.get("/login")

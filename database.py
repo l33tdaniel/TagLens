@@ -53,6 +53,7 @@ class ImageRecord:
     filename: str
     faces_json: str
     ocr_text: str
+    ai_description: str
     created_at: str
 
 
@@ -109,11 +110,19 @@ class Database:
                     filename TEXT NOT NULL,
                     faces_json TEXT NOT NULL,
                     ocr_text TEXT NOT NULL,
+                    ai_description TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
                 """
             )
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN ai_description TEXT NOT NULL DEFAULT ''"
+                )
+            except aiosqlite.OperationalError:
+                # Existing databases will already have this column after first migration.
+                pass
             await conn.commit()
 
     async def fetch_one(
@@ -221,17 +230,29 @@ class Database:
         )
 
     async def create_image_metadata(
-        self, filename: str, faces_json: str, ocr_text: str, user_id: Optional[int] = None
+        self,
+        filename: str,
+        faces_json: str,
+        ocr_text: str,
+        user_id: Optional[int] = None,
+        ai_description: str = "",
     ) -> ImageRecord:
         """Insert processed image metadata and return the constructed dataclass."""
         created_at = datetime.utcnow().isoformat()
         async with self._connection() as conn:
             cursor = await conn.execute(
                 """
-                INSERT INTO images (user_id, filename, faces_json, ocr_text, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO images (
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, filename, faces_json, ocr_text, created_at),
+                (user_id, filename, faces_json, ocr_text, ai_description, created_at),
             )
             await conn.commit()
             lastrowid = cursor.lastrowid
@@ -244,8 +265,25 @@ class Database:
             filename=filename,
             faces_json=faces_json,
             ocr_text=ocr_text,
+            ai_description=ai_description,
             created_at=created_at,
         )
+
+    async def list_images_for_user(self, user_id: int) -> list[ImageRecord]:
+        """Return all images owned by the given user, newest first."""
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT id, user_id, filename, faces_json, ocr_text, ai_description, created_at
+                FROM images
+                WHERE user_id = ?
+                ORDER BY id DESC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [ImageRecord(**row) for row in rows]
 
     async def fetch_session_by_token_hash(
         self, token_hash: str

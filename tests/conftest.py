@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from email.message import Message
 import http.cookiejar
+import json
 import os
 from pathlib import Path
 import shutil
@@ -44,17 +45,23 @@ class TestClient:
         path: str,
         *,
         data: dict[str, str] | None = None,
+        json_data: dict | None = None,
         headers: dict[str, str] | None = None,
     ) -> TestResponse:
         url = f"{self.base_url}{path}"
         body = None
         req_headers = headers.copy() if headers else {}
+        if data is not None and json_data is not None:
+            raise ValueError("Only one of data or json_data may be provided.")
         if data is not None:
             encoded = urllib.parse.urlencode(data)
             body = encoded.encode("utf-8")
             req_headers.setdefault(
                 "Content-Type", "application/x-www-form-urlencoded"
             )
+        if json_data is not None:
+            body = json.dumps(json_data).encode("utf-8")
+            req_headers.setdefault("Content-Type", "application/json")
         request = urllib.request.Request(
             url, data=body, headers=req_headers, method=method
         )

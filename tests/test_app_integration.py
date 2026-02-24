@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import base64
 import re
 import sqlite3
 from uuid import uuid4
@@ -185,3 +186,34 @@ def test_login_revokes_existing_session(server: ServerInfo) -> None:
         ).fetchone()
     assert row is not None
     assert row[0] is not None
+
+
+def test_profile_api_requires_authentication(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    response = client.request("GET", "/api/profile")
+    assert response.status == 401
+
+
+def test_photo_upload_persists_generated_description_field(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    image_base64 = base64.b64encode(b"fake image bytes").decode("utf-8")
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "test.png",
+            "image_base64": image_base64,
+        },
+    )
+    assert upload.status == 201
+
+    payload = client.request("GET", "/api/profile")
+    assert payload.status == 200
+    assert "test.png" in payload.body

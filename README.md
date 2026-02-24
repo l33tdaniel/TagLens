@@ -8,6 +8,7 @@ This project is a small Robyn application that demonstrates a secure username/pa
 - `robyn` runs the asynchronous web server.
 - SQLite stores user records with hashed-and-salted passwords using `passlib[bcrypt]`.
 - Auth-protected routes (`/dashboard`, `/profile`) redirect to `/login` when there is no session cookie.
+- Authenticated photo uploads can call Ollama to generate a short AI description per image.
 - Public routes (`/`, `/public`, `/register`, `/login`) remain open to everyone.
 - Session cookies are opaque tokens stored server-side in SQLite and default to `httponly`, `samesite=lax`, and configurable `secure` mode.
 - CSRF protection uses the double-submit cookie pattern for HTML forms.
@@ -48,6 +49,8 @@ python scripts\metadata.py "C:\\path\\to\\image.jpg"
 - `GET /register` + `POST /register` – create a new username/email + password.
 - `GET /login` + `POST /login` – authenticate and receive a session cookie.
 - `GET /dashboard`, `GET /profile` – require an active session cookie and redirect to `/login` if missing.
+- `GET /api/profile` – returns JSON profile metadata and uploaded photos (requires session cookie).
+- `POST /api/photos` – accepts JSON `{ "filename": "...", "image_base64": "..." }`, stores the photo metadata, and adds an Ollama-generated description when available (requires session cookie).
 - `POST /logout` – revokes the session cookie and sends you back to `/`.
 
 ## Security notes
@@ -59,6 +62,9 @@ python scripts\metadata.py "C:\\path\\to\\image.jpg"
 
 ## Development tips
 - The SQLite file lives under `data/users.db`; it is ignored by `.gitignore`.
+- Configure Ollama integration with:
+  - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
+  - `OLLAMA_MODEL` (default `llava`)
 - To reset the database, stop the server and delete `data/users.db` before restarting.
 - You can toggle secure cookies by setting `ROBYN_SECURE_COOKIES=1` in the environment (remember to run behind HTTPS when secure cookies are enabled).
 
