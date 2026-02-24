@@ -7,6 +7,8 @@ import base64
 import json
 import os
 import asyncio
+import logging
+import mimetypes
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
@@ -31,6 +33,7 @@ import aiosqlite
 # Author: Daniel Neugent
 
 app = Robyn(__file__)
+logger = logging.getLogger(__name__)
 
 # Singletons used by every request
 db = Database()
@@ -305,6 +308,28 @@ def _ollama_model() -> str:
     return os.getenv("OLLAMA_MODEL", "llava")
 
 
+def _normalize_content_type(content_type: str, filename: str) -> str:
+    candidate = (content_type or "").strip().lower()
+    if candidate.startswith("image/"):
+        return candidate
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed and guessed.startswith("image/"):
+        return guessed
+    return "application/octet-stream"
+
+
+def _parse_taken_at(value: object) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    normalized = raw.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return parsed.isoformat()
+
+
 def _generate_image_description_with_ollama(
     image_bytes: bytes,
     *,
@@ -565,7 +590,20 @@ async def profile_api(request: Request) -> Response:
     if isinstance(auth, Response):
         return _json_response({"error": "authentication required"}, status=401)
     user = auth.user
-    images = await db.list_images_for_user(user.id)
+    sort_by = str(request.query_params.get("sort_by", "uploaded")).strip().lower()
+    order = str(request.query_params.get("order", "desc")).strip().lower()
+    if sort_by not in {"uploaded", "taken"}:
+        return _json_response({"error": "sort_by must be uploaded or taken"}, status=400)
+    if order not in {"asc", "desc"}:
+        return _json_response({"error": "order must be asc or desc"}, status=400)
+    images = await db.list_images_for_user(user.id, sort_by=sort_by, order=order)
+    logger.info(
+        "profile photos listed user_id=%s count=%s sort_by=%s order=%s",
+        user.id,
+        len(images),
+        sort_by,
+        order,
+    )
     return _json_response(
         {
             "username": user.username,
@@ -576,6 +614,7 @@ async def profile_api(request: Request) -> Response:
                     "id": record.id,
                     "filename": record.filename,
                     "created_at": record.created_at,
+                    "taken_at": record.taken_at,
                     "description": record.ai_description,
                     "ocr_text": record.ocr_text,
                 }
@@ -593,7 +632,18 @@ async def upload_photo_api(request: Request) -> Response:
     payload = _json_data(request)
     filename = str(payload.get("filename", "")).strip()
     image_base64 = str(payload.get("image_base64", "")).strip()
+    taken_at = _parse_taken_at(payload.get("taken_at"))
+    content_type = _normalize_content_type(
+        str(payload.get("content_type", "")),
+        filename,
+    )
     if not filename or not image_base64:
+        logger.warning(
+            "upload rejected user_id=%s reason=missing_fields filename_present=%s image_present=%s",
+            auth.user.id,
+            bool(filename),
+            bool(image_base64),
+        )
         return _json_response(
             {"error": "filename and image_base64 are required"},
             status=400,
@@ -601,30 +651,158 @@ async def upload_photo_api(request: Request) -> Response:
     try:
         image_bytes = base64.b64decode(image_base64, validate=True)
     except (ValueError, TypeError):
+        logger.warning(
+            "upload rejected user_id=%s filename=%s reason=invalid_base64",
+            auth.user.id,
+            filename,
+        )
         return _json_response({"error": "invalid image_base64 payload"}, status=400)
     if not image_bytes:
+        logger.warning(
+            "upload rejected user_id=%s filename=%s reason=empty_payload",
+            auth.user.id,
+            filename,
+        )
         return _json_response({"error": "empty image payload"}, status=400)
-    description = await asyncio.to_thread(
-        _generate_image_description_with_ollama,
-        image_bytes,
-        filename=filename,
+    logger.info(
+        "upload started user_id=%s filename=%s bytes=%s content_type=%s",
+        auth.user.id,
+        filename,
+        len(image_bytes),
+        content_type,
     )
-    saved = await db.create_image_metadata(
-        filename=filename,
-        faces_json="[]",
-        ocr_text="",
-        user_id=auth.user.id,
-        ai_description=description,
+    try:
+        description = await asyncio.to_thread(
+            _generate_image_description_with_ollama,
+            image_bytes,
+            filename=filename,
+        )
+        saved = await db.create_image_metadata(
+            filename=filename,
+            faces_json="[]",
+            ocr_text="",
+            user_id=auth.user.id,
+            ai_description=description,
+            content_type=content_type,
+            image_data=image_bytes,
+            taken_at=taken_at,
+        )
+    except Exception:
+        logger.exception(
+            "upload failed user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+        )
+        return _json_response({"error": "upload failed unexpectedly"}, status=500)
+    logger.info(
+        "upload completed user_id=%s photo_id=%s filename=%s",
+        auth.user.id,
+        saved.id,
+        filename,
     )
     return _json_response(
         {
             "id": saved.id,
             "filename": saved.filename,
             "created_at": saved.created_at,
+            "taken_at": saved.taken_at,
             "description": saved.ai_description,
         },
         status=201,
     )
+
+
+@app.get("/api/photos/download")
+async def download_photo_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
+    if not raw_photo_id.isdigit():
+        logger.warning(
+            "download rejected user_id=%s reason=invalid_photo_id value=%s",
+            auth.user.id,
+            raw_photo_id,
+        )
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(raw_photo_id)
+    logger.info("download requested user_id=%s photo_id=%s", auth.user.id, photo_id)
+    try:
+        record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    except Exception:
+        logger.exception(
+            "download failed user_id=%s photo_id=%s reason=db_error",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "download failed unexpectedly"}, status=500)
+    if not record:
+        logger.warning(
+            "download rejected user_id=%s photo_id=%s reason=not_found",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "photo not found"}, status=404)
+    if not record.image_data:
+        logger.warning(
+            "download rejected user_id=%s photo_id=%s reason=missing_image_data",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "photo binary data is unavailable"}, status=404)
+    logger.info(
+        "download completed user_id=%s photo_id=%s filename=%s bytes=%s",
+        auth.user.id,
+        photo_id,
+        record.filename,
+        len(record.image_data),
+    )
+    return _json_response(
+        {
+            "id": record.id,
+            "filename": record.filename,
+            "content_type": record.content_type,
+            "created_at": record.created_at,
+            "taken_at": record.taken_at,
+            "image_base64": base64.b64encode(record.image_data).decode("utf-8"),
+        }
+    )
+
+
+@app.delete("/api/photos")
+async def delete_photo_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    if payload.get("confirm_delete") is not True:
+        return _json_response(
+            {"error": "confirm_delete=true is required to delete a photo"},
+            status=400,
+        )
+    photo_id = int(photo_id_raw)
+    logger.info("delete requested user_id=%s photo_id=%s", auth.user.id, photo_id)
+    try:
+        deleted = await db.delete_image_for_user(photo_id, auth.user.id)
+    except Exception:
+        logger.exception(
+            "delete failed user_id=%s photo_id=%s reason=db_error",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "delete failed unexpectedly"}, status=500)
+    if not deleted:
+        logger.warning(
+            "delete rejected user_id=%s photo_id=%s reason=not_found",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "photo not found"}, status=404)
+    logger.info("delete completed user_id=%s photo_id=%s", auth.user.id, photo_id)
+    return _json_response({"status": "deleted", "photo_id": photo_id})
 
 
 @app.get("/login")

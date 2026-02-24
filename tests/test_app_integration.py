@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import base64
+import json
 import re
 import sqlite3
 from uuid import uuid4
@@ -217,3 +218,120 @@ def test_photo_upload_persists_generated_description_field(server: ServerInfo) -
     payload = client.request("GET", "/api/profile")
     assert payload.status == 200
     assert "test.png" in payload.body
+
+
+def test_profile_photo_sort_by_taken_date(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    first = base64.b64encode(b"first-image").decode("utf-8")
+    second = base64.b64encode(b"second-image").decode("utf-8")
+    created = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "older-upload-newer-taken.jpg",
+            "image_base64": first,
+            "taken_at": "2025-01-10T10:00:00Z",
+            "content_type": "image/jpeg",
+        },
+    )
+    assert created.status == 201
+    created = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "newer-upload-older-taken.jpg",
+            "image_base64": second,
+            "taken_at": "2024-01-10T10:00:00Z",
+            "content_type": "image/jpeg",
+        },
+    )
+    assert created.status == 201
+
+    response = client.request("GET", "/api/profile?sort_by=taken&order=asc")
+    assert response.status == 200
+    payload = json.loads(response.body)
+    assert payload["photos"][0]["filename"] == "newer-upload-older-taken.jpg"
+    assert payload["photos"][1]["filename"] == "older-upload-newer-taken.jpg"
+
+
+def test_photo_delete_requires_confirmation_and_deletes(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    image_base64 = base64.b64encode(b"to-delete").decode("utf-8")
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "delete-me.png",
+            "image_base64": image_base64,
+            "content_type": "image/png",
+        },
+    )
+    assert upload.status == 201
+    uploaded = json.loads(upload.body)
+    photo_id = uploaded["id"]
+
+    rejected = client.request(
+        "DELETE",
+        "/api/photos",
+        json_data={"photo_id": photo_id, "confirm_delete": False},
+    )
+    assert rejected.status == 400
+
+    deleted = client.request(
+        "DELETE",
+        "/api/photos",
+        json_data={"photo_id": photo_id, "confirm_delete": True},
+    )
+    assert deleted.status == 200
+
+    profile = client.request("GET", "/api/profile")
+    assert profile.status == 200
+    payload = json.loads(profile.body)
+    assert payload["photos"] == []
+
+
+def test_photo_download_returns_uploaded_binary(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    raw = b"download-me-image"
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "download-me.webp",
+            "image_base64": base64.b64encode(raw).decode("utf-8"),
+            "content_type": "image/webp",
+        },
+    )
+    assert upload.status == 201
+    saved = json.loads(upload.body)
+
+    download = client.request(
+        "GET",
+        f"/api/photos/download?photo_id={saved['id']}",
+    )
+    assert download.status == 200
+    payload = json.loads(download.body)
+    assert payload["filename"] == "download-me.webp"
+    assert payload["content_type"] == "image/webp"
+    assert base64.b64decode(payload["image_base64"]) == raw
