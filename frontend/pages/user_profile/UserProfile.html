@@ -196,9 +196,22 @@
       <div id="fileList" class="mt-4 text-sm text-gray-600"></div>
     </div>
 
-    <h3 class="text-2xl font-semibold text-gray-900 mb-8">
-      Your Gallery
-    </h3>
+    <div class="mb-6 flex flex-wrap items-center justify-between gap-4">
+      <h3 class="text-2xl font-semibold text-gray-900">
+        Your Gallery
+      </h3>
+      <div class="flex items-center gap-3">
+        <label for="sortBy" class="text-sm text-gray-600">Sort by</label>
+        <select id="sortBy" class="rounded-full border border-orange-300 bg-white/80 px-3 py-2 text-sm">
+          <option value="uploaded">Date Uploaded</option>
+          <option value="taken">Date Taken</option>
+        </select>
+        <select id="sortOrder" class="rounded-full border border-orange-300 bg-white/80 px-3 py-2 text-sm">
+          <option value="desc">Newest first</option>
+          <option value="asc">Oldest first</option>
+        </select>
+      </div>
+    </div>
 
     <div id="galleryGrid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4"></div>
 

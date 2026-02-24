@@ -54,6 +54,9 @@ class ImageRecord:
     faces_json: str
     ocr_text: str
     ai_description: str
+    content_type: str
+    image_data: Optional[bytes]
+    taken_at: Optional[str]
     created_at: str
 
 
@@ -111,6 +114,9 @@ class Database:
                     faces_json TEXT NOT NULL,
                     ocr_text TEXT NOT NULL,
                     ai_description TEXT NOT NULL DEFAULT '',
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    image_data BLOB,
+                    taken_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
@@ -122,6 +128,24 @@ class Database:
                 )
             except aiosqlite.OperationalError:
                 # Existing databases will already have this column after first migration.
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN content_type TEXT NOT NULL DEFAULT 'application/octet-stream'"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN image_data BLOB"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN taken_at TEXT"
+                )
+            except aiosqlite.OperationalError:
                 pass
             await conn.commit()
 
@@ -236,6 +260,9 @@ class Database:
         ocr_text: str,
         user_id: Optional[int] = None,
         ai_description: str = "",
+        content_type: str = "application/octet-stream",
+        image_data: Optional[bytes] = None,
+        taken_at: Optional[str] = None,
     ) -> ImageRecord:
         """Insert processed image metadata and return the constructed dataclass."""
         created_at = datetime.utcnow().isoformat()
@@ -248,11 +275,24 @@ class Database:
                     faces_json,
                     ocr_text,
                     ai_description,
+                    content_type,
+                    image_data,
+                    taken_at,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, filename, faces_json, ocr_text, ai_description, created_at),
+                (
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    content_type,
+                    image_data,
+                    taken_at,
+                    created_at,
+                ),
             )
             await conn.commit()
             lastrowid = cursor.lastrowid
@@ -266,24 +306,81 @@ class Database:
             faces_json=faces_json,
             ocr_text=ocr_text,
             ai_description=ai_description,
+            content_type=content_type,
+            image_data=image_data,
+            taken_at=taken_at,
             created_at=created_at,
         )
 
-    async def list_images_for_user(self, user_id: int) -> list[ImageRecord]:
-        """Return all images owned by the given user, newest first."""
+    async def list_images_for_user(
+        self,
+        user_id: int,
+        *,
+        sort_by: str = "uploaded",
+        order: str = "desc",
+    ) -> list[ImageRecord]:
+        """Return all images owned by the given user with configurable sorting."""
+        sort_clause = "created_at"
+        if sort_by == "taken":
+            sort_clause = "COALESCE(taken_at, created_at)"
+        order_clause = "DESC" if order.lower() == "desc" else "ASC"
         async with self._connection() as conn:
             cursor = await conn.execute(
-                """
-                SELECT id, user_id, filename, faces_json, ocr_text, ai_description, created_at
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    content_type,
+                    image_data,
+                    taken_at,
+                    created_at
                 FROM images
                 WHERE user_id = ?
-                ORDER BY id DESC
+                ORDER BY {sort_clause} {order_clause}, id DESC
                 """,
                 (user_id,),
             )
             rows = await cursor.fetchall()
             await cursor.close()
         return [ImageRecord(**row) for row in rows]
+
+    async def fetch_image_for_user(
+        self, image_id: int, user_id: int
+    ) -> Optional[ImageRecord]:
+        row = await self.fetch_one(
+            """
+            SELECT
+                id,
+                user_id,
+                filename,
+                faces_json,
+                ocr_text,
+                ai_description,
+                content_type,
+                image_data,
+                taken_at,
+                created_at
+            FROM images
+            WHERE id = ? AND user_id = ?
+            """,
+            (image_id, user_id),
+        )
+        return ImageRecord(**row) if row else None
+
+    async def delete_image_for_user(self, image_id: int, user_id: int) -> bool:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM images WHERE id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            await conn.commit()
+            deleted = cursor.rowcount or 0
+            await cursor.close()
+        return deleted > 0
 
     async def fetch_session_by_token_hash(
         self, token_hash: str

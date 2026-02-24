@@ -49,8 +49,10 @@ python scripts\metadata.py "C:\\path\\to\\image.jpg"
 - `GET /register` + `POST /register` – create a new username/email + password.
 - `GET /login` + `POST /login` – authenticate and receive a session cookie.
 - `GET /dashboard`, `GET /profile` – require an active session cookie and redirect to `/login` if missing.
-- `GET /api/profile` – returns JSON profile metadata and uploaded photos (requires session cookie).
-- `POST /api/photos` – accepts JSON `{ "filename": "...", "image_base64": "..." }`, stores the photo metadata, and adds an Ollama-generated description when available (requires session cookie).
+- `GET /api/profile` – returns JSON profile metadata and uploaded photos (requires session cookie). Supports `sort_by=uploaded|taken` and `order=asc|desc`.
+- `POST /api/photos` – accepts JSON `{ "filename": "...", "image_base64": "...", "content_type": "image/png", "taken_at": "ISO-8601" }`, stores metadata + binary payload, and adds an Ollama-generated description when available (requires session cookie).
+- `GET /api/photos/download?photo_id=<id>` – returns JSON with the photo metadata and base64 image payload for a single photo (requires session cookie).
+- `DELETE /api/photos` – requires JSON `{ "photo_id": <id>, "confirm_delete": true }` and permanently deletes the photo (requires session cookie).
 - `POST /logout` – revokes the session cookie and sends you back to `/`.
 
 ## Security notes

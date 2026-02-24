@@ -5,6 +5,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const fileList = document.getElementById("fileList");
   const galleryGrid = document.getElementById("galleryGrid");
   const photosCount = document.getElementById("photosCount");
+  const sortBy = document.getElementById("sortBy");
+  const sortOrder = document.getElementById("sortOrder");
+  let currentPhotos = [];
 
   browseBtn.addEventListener("click", (event) => {
     event.preventDefault();
@@ -30,11 +33,23 @@ document.addEventListener("DOMContentLoaded", () => {
     await handleFiles(fileInput.files);
   });
 
+  sortBy.addEventListener("change", () => {
+    loadProfile();
+  });
+
+  sortOrder.addEventListener("change", () => {
+    loadProfile();
+  });
+
   loadProfile();
 
   async function loadProfile() {
     try {
-      const response = await fetch("/api/profile");
+      const params = new URLSearchParams({
+        sort_by: sortBy.value,
+        order: sortOrder.value,
+      });
+      const response = await fetch(`/api/profile?${params.toString()}`);
       if (!response.ok) {
         window.location.href = "/login";
         return;
@@ -44,7 +59,8 @@ document.addEventListener("DOMContentLoaded", () => {
       document.getElementById("email").textContent = data.email;
       document.getElementById("created").textContent =
         "Member since " + new Date(data.created_at).toLocaleDateString();
-      renderGallery(data.photos || []);
+      currentPhotos = data.photos || [];
+      renderGallery(currentPhotos);
     } catch (error) {
       console.error("Failed to load profile data:", error);
     }
@@ -73,6 +89,8 @@ document.addEventListener("DOMContentLoaded", () => {
           body: JSON.stringify({
             filename: file.name,
             image_base64: imageBase64,
+            content_type: file.type || "application/octet-stream",
+            taken_at: new Date(file.lastModified).toISOString(),
           }),
         });
 
@@ -84,7 +102,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         const savedPhoto = await uploadResponse.json();
         status.textContent = `${file.name}: complete`;
-        prependPhotoCard(savedPhoto);
+        await loadProfile();
       } catch (error) {
         status.textContent = `Failed ${file.name}: ${String(error)}`;
       }
@@ -117,12 +135,6 @@ document.addEventListener("DOMContentLoaded", () => {
     photosCount.textContent = String(photos.length);
   }
 
-  function prependPhotoCard(photo) {
-    galleryGrid.prepend(buildPhotoCard(photo));
-    const count = Number(photosCount.textContent || "0") + 1;
-    photosCount.textContent = String(count);
-  }
-
   function buildPhotoCard(photo) {
     const card = document.createElement("div");
     card.className = "border border-orange-200 bg-white rounded-xl p-4";
@@ -137,11 +149,94 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const timestamp = document.createElement("p");
     timestamp.className = "mt-2 text-xs text-gray-400";
-    timestamp.textContent = new Date(photo.created_at).toLocaleString();
+    timestamp.textContent = `Uploaded: ${new Date(photo.created_at).toLocaleString()}`;
+
+    const takenAt = document.createElement("p");
+    takenAt.className = "mt-1 text-xs text-gray-400";
+    takenAt.textContent = photo.taken_at
+      ? `Taken: ${new Date(photo.taken_at).toLocaleString()}`
+      : "Taken: Unknown";
+
+    const actions = document.createElement("div");
+    actions.className = "mt-3 flex gap-2";
+
+    const downloadButton = document.createElement("button");
+    downloadButton.className =
+      "rounded-full border border-orange-300 bg-white px-3 py-1 text-xs font-medium text-gray-700";
+    downloadButton.textContent = "Download";
+    downloadButton.addEventListener("click", async () => {
+      await downloadPhoto(photo.id);
+    });
+
+    const deleteButton = document.createElement("button");
+    deleteButton.className =
+      "rounded-full border border-red-300 bg-red-50 px-3 py-1 text-xs font-medium text-red-700";
+    deleteButton.textContent = "Delete";
+    deleteButton.addEventListener("click", async () => {
+      await deletePhoto(photo.id, photo.filename);
+    });
+
+    actions.appendChild(downloadButton);
+    actions.appendChild(deleteButton);
 
     card.appendChild(title);
     card.appendChild(description);
     card.appendChild(timestamp);
+    card.appendChild(takenAt);
+    card.appendChild(actions);
     return card;
+  }
+
+  async function downloadPhoto(photoId) {
+    try {
+      const response = await fetch(`/api/photos/download?photo_id=${photoId}`);
+      const payload = await response.json();
+      if (!response.ok) {
+        alert(payload.error || "Download failed.");
+        return;
+      }
+      const byteCharacters = atob(payload.image_base64 || "");
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i += 1) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const blob = new Blob([new Uint8Array(byteNumbers)], {
+        type: payload.content_type || "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = payload.filename || `photo-${photoId}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(`Download failed: ${String(error)}`);
+    }
+  }
+
+  async function deletePhoto(photoId, filename) {
+    const approved = window.confirm(
+      `Delete "${filename}" permanently? This cannot be undone.`,
+    );
+    if (!approved) {
+      return;
+    }
+    try {
+      const response = await fetch("/api/photos", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo_id: photoId, confirm_delete: true }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(payload.error || "Delete failed.");
+        return;
+      }
+      await loadProfile();
+    } catch (error) {
+      alert(`Delete failed: ${String(error)}`);
+    }
   }
 });
