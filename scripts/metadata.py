@@ -6,7 +6,7 @@ import sys
 
 import numpy as np
 import cv2
-import pytesseract
+# import pytesseract
 from PIL import Image, ImageFile
 from PIL.ExifTags import TAGS, GPSTAGS
 import pillow_heif
@@ -32,10 +32,10 @@ else:
 
 print(f"Using device: {device}")
 
-if os.name == "nt":
-    _tess_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-    if os.path.exists(_tess_default):
-        pytesseract.pytesseract.tesseract_cmd = _tess_default
+# if os.name == "nt":
+#     _tess_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+#     if os.path.exists(_tess_default):
+#         pytesseract.pytesseract.tesseract_cmd = _tess_default
 
 model = None
 if AutoModelForCausalLM and torch:
@@ -69,44 +69,44 @@ def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
     return [{"x": int(x), "y": int(y), "w": int(w), "h": int(h)} for (x, y, w, h) in faces]
 
 
-def extract_ocr(img: Image.Image) -> Dict[str, Any]:
-    """Extract OCR text and bounding boxes from image
-    Returns dict with keys: text (str), boxes (List[Dict]), raw (dict), available (bool).
-    """
-    result: Dict[str, Any] = {"text": "", "boxes": [], "raw": {}, "available": True}
-    try:
-        data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config='--psm 11')
-        test = pytesseract.image_to_string(img, config='--psm 11')
-        result["raw"] = data
-        print(result)
-        print(test)
-        lines: List[str] = []
-        boxes: List[Dict[str, int]] = []
-        n = len(data.get("text", []))
-        for i in range(n):
-            conf = int(data.get("conf", ["-1"])[i]) if data.get("conf") else -1
-            txt = data.get("text", [""])[i]
-            if txt and conf >= 60:  # filter low-confidence tokens
-                lines.append(txt)
-                boxes.append(
-                    {
-                        "x": int(data.get("left", [0])[i]),
-                        "y": int(data.get("top", [0])[i]),
-                        "w": int(data.get("width", [0])[i]),
-                        "h": int(data.get("height", [0])[i]),
-                        "conf": conf,
-                    }
-                )
-        result["text"] = " ".join(lines).strip()
-        result["boxes"] = boxes
-    except (pytesseract.TesseractNotFoundError, OSError) as e:
-        # Tesseract binary not found on system; mark unavailable gracefully
-        result["available"] = False
-        result["text"] = ""
-        result["boxes"] = []
-        result["raw"] = {"error": str(e)}
-        print(e)
-    return result
+# def extract_ocr(img: Image.Image) -> Dict[str, Any]:
+#     """Extract OCR text and bounding boxes from image
+#     Returns dict with keys: text (str), boxes (List[Dict]), raw (dict), available (bool).
+#     """
+#     result: Dict[str, Any] = {"text": "", "boxes": [], "raw": {}, "available": True}
+#     try:
+#         data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config='--psm 11')
+#         test = pytesseract.image_to_string(img, config='--psm 11')
+#         result["raw"] = data
+#         print(result)
+#         print(test)
+#         lines: List[str] = []
+#         boxes: List[Dict[str, int]] = []
+#         n = len(data.get("text", []))
+#         for i in range(n):
+#             conf = int(data.get("conf", ["-1"])[i]) if data.get("conf") else -1
+#             txt = data.get("text", [""])[i]
+#             if txt and conf >= 60:  # filter low-confidence tokens
+#                 lines.append(txt)
+#                 boxes.append(
+#                     {
+#                         "x": int(data.get("left", [0])[i]),
+#                         "y": int(data.get("top", [0])[i]),
+#                         "w": int(data.get("width", [0])[i]),
+#                         "h": int(data.get("height", [0])[i]),
+#                         "conf": conf,
+#                     }
+#                 )
+#         result["text"] = " ".join(lines).strip()
+#         result["boxes"] = boxes
+#     except (pytesseract.TesseractNotFoundError, OSError) as e:
+#         # Tesseract binary not found on system; mark unavailable gracefully
+#         result["available"] = False
+#         result["text"] = ""
+#         result["boxes"] = []
+#         result["raw"] = {"error": str(e)}
+#         print(e)
+#     return result
 
 def ocr2(img):
     result = None
