@@ -1,17 +1,18 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Tuple
+from urllib import response
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
 import base64
 import json
 import os
-import asyncio
-import logging
-import mimetypes
+import pathlib
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
+from robyn.templating import JinjaTemplate
+import jinja2
 
 from auth import (
     CSRF_COOKIE_NAME,
@@ -35,7 +36,11 @@ import aiosqlite
 app = Robyn(__file__)
 logger = logging.getLogger(__name__)
 
-app.static("/static", "frontend/static")
+current_file_path = pathlib.Path(__file__).parent.resolve()
+
+jinja_template = JinjaTemplate(
+    os.path.join(current_file_path, "frontend/pages")
+)
 
 # Singletons used by every request
 db = Database()
@@ -472,13 +477,11 @@ async def home(request: Request) -> Response:
       <p>Navigate using the links above; authenticated areas require a session cookie.</p>
     </section>
     """
-    response = _html_response(
-        _page_template(
-            title="TagLens",
-            body=body,
-            user=context.user,
-            csrf_token=csrf_token,
-        ),
+    response = jinja_template.render_template(
+        "base/Base.html",
+        request=request,
+        title="Welcome to TagLens",
+        body=body,
     )
     _apply_common_cookies(
         response,
@@ -549,35 +552,6 @@ async def dashboard(request: Request) -> Response:
     )
     return response
 
-@app.get("/api/profile")
-async def profile_data(request):
-    auth = await _ensure_authenticated(request)
-    if isinstance(auth, Response):
-        return auth
-
-    context = auth
-    user = context.user
-    csrf_token, set_csrf = _get_or_create_csrf_token(request)
-
-    response = Response(
-        status_code=200,
-        headers={"Content-Type": "application/json"},
-        description=json.dumps({
-            "username": user.username,
-            "email": user.email,
-            "created_at": str(user.created_at)
-        })
-    )
-
-    _apply_common_cookies(
-        response,
-        clear_session=context.clear_cookie,
-        csrf_token=csrf_token,
-        set_csrf=set_csrf,
-    )
-
-    return response
-
 
 
 @app.get("/profile")
@@ -589,12 +563,22 @@ async def profile(request: Request) -> Response:
     context = auth
     user = context.user
     csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    with open("frontend/pages/user_profile/UserProfile.html", "r", encoding="utf-8") as f:
-        html = f.read()
     
-    response = Response(status_code = 200,
-                        headers = {"content-type": "text/html"},
-                        description=html,)
+
+    created_at = datetime.fromisoformat(user.created_at)
+
+    user_dict = {
+    "username": user.username,
+    "email": user.email,
+    "created_at": created_at
+    }
+
+    
+    response = jinja_template.render_template(
+        "user_profile/UserProfile.html",
+        request=request,
+        user=user_dict
+    )
     
     _apply_common_cookies(
         response,
@@ -848,13 +832,11 @@ async def login_get(request: Request) -> Response:
     messages: list[str] = []
     if request.query_params.get("registered", None) == "1":
         messages.append("Account created. Please sign in.")
-    response = _html_response(
-        _page_template(
-            title="Sign in",
-            body=_login_form(next_path, csrf_token, messages=messages),
-            messages=None,
-            csrf_token=csrf_token,
-        )
+    response = jinja_template.render_template(
+        "login/Login.html",
+        request=request,
+        next_path=next_path,
+        csrf_token=csrf_token,
     )
     _apply_common_cookies(
         response,
@@ -884,32 +866,38 @@ async def login_post(request: Request) -> Response:
         errors.append("Password is required.")
     if errors:
         csrf_token = generate_csrf_token()
-        response = _html_response(
-            _page_template(
-                title="Sign in",
-                body=_login_form(next_path, csrf_token, messages=errors),
-                messages=None,
-                csrf_token=csrf_token,
-            ),
-            status=400 if not csrf_valid else 200,
+        template_response = jinja_template.render_template(
+            "login/Login.html",
+            request=request,
+            next_path=next_path,
+            csrf_token=csrf_token,
+        )
+
+        status = 400 if not csrf_valid else 200
+
+        response = Response(
+            description=template_response.description,
+            status_code=status,
+            headers=template_response.headers
         )
         _set_csrf_cookie(response, csrf_token)
         return response
     user = await db.fetch_user_by_email(email)
     if not user or not verify_password(password, user.password_hash):
         csrf_token = generate_csrf_token()
-        response = _html_response(
-            _page_template(
-                title="Sign in",
-                body=_login_form(
-                    next_path,
-                    csrf_token,
-                    messages=["Invalid credentials."],
-                ),
-                messages=None,
-                csrf_token=csrf_token,
-            ),
-            status=401,
+        template_response = jinja_template.render_template(
+            "login/login.html",
+            request=request,
+            title="Sign in",
+            next_path=next_path,
+            csrf_token=csrf_token,
+            messages=["Invalid credentials."]
+        )
+
+        response = Response(
+            description=template_response.description,
+            status_code=401,
+            headers=template_response.headers
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -947,13 +935,10 @@ async def register_get(request: Request) -> Response:
     if context.user:
         return _redirect("/dashboard")
     csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    response = _html_response(
-        _page_template(
-            title="Register",
-            body=_register_form(csrf_token),
-            csrf_token=csrf_token,
-        ),
-    )
+    response = jinja_template.render_template(
+        "register/Register.html",
+        request=request,
+        csrf_token=csrf_token,)
     _apply_common_cookies(
         response,
         clear_session=context.clear_cookie,
@@ -988,17 +973,18 @@ async def register_post(request: Request) -> Response:
         errors.append("Password confirmation does not match.")
     if errors:
         csrf_token = generate_csrf_token()
-        response = _html_response(
-            _page_template(
-                title="Register",
-                body=_register_form(
-                    csrf_token,
-                    {"username": username, "email": email},
-                    messages=errors,
-                ),
-                csrf_token=csrf_token,
-            ),
-            status=400 if not csrf_valid else 200,
+        template_response = jinja_template.render_template(
+            "register/Register.html",
+            request=request,
+            csrf_token=csrf_token,
+        )
+
+        status = 400 if not csrf_valid else 200
+
+        response = Response(
+            description=template_response.description,
+            status_code=status,
+            headers=template_response.headers
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -1009,16 +995,18 @@ async def register_post(request: Request) -> Response:
         # The DB enforces uniqueness so a duplicate inserts will raise here.
         errors.append("That username or email is already registered.")
         csrf_token = generate_csrf_token()
-        response = _html_response(
-            _page_template(
-                title="Register",
-                body=_register_form(
-                    csrf_token,
-                    {"username": username, "email": email},
-                    messages=errors,
-                ),
-                csrf_token=csrf_token,
-            )
+        template_response = jinja_template.render_template(
+            "login/Login.html",
+            request=request,
+            csrf_token=csrf_token,
+        )
+
+        status = 400 if not csrf_valid else 200
+
+        response = Response(
+            description=template_response.description,
+            status_code=status,
+            headers=template_response.headers
         )
         _set_csrf_cookie(response, csrf_token)
         return response

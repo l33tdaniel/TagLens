@@ -5,3 +5,4 @@ bcrypt<4.0
 argon2-cffi>=23.1
 aiosqlite>=0.20
 markupsafe>=2.1
+Jinja2>=3.1
