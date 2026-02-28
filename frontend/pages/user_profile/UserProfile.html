@@ -87,34 +87,47 @@
     <!-- Center: Oval Nav -->
     <nav class="flex items-center gap-4">
 
-      <button class="h-11 px-6 rounded-full
-                     border border-orange-200
-                     bg-white/50
-                     flex items-center
-                     text-sm font-medium
-                     hover:bg-orange-50 transition">
-        Upload
-      </button>
+    <a href="/"
+      class="h-11 px-6 rounded-full
+              border border-orange-200
+              bg-white/50
+              flex items-center
+              text-sm font-medium
+              hover:bg-orange-50 transition">
+      Home
+    </a>
 
-      <button class="h-11 px-6 rounded-full
-                     border border-orange-200
-                     bg-white/50
-                     flex items-center
-                     text-sm font-medium
-                     hover:bg-orange-50 transition">
-        Gallery
-      </button>
+    <a href="/public"
+      class="h-11 px-6 rounded-full
+              border border-orange-200
+              bg-white/50
+              flex items-center
+              text-sm font-medium
+              hover:bg-orange-50 transition">
+      Public
+    </a>
 
-      <button class="h-11 px-6 rounded-full
-                     border border-orange-200
-                     bg-white/50
-                     flex items-center
-                     text-sm font-medium
-                     hover:bg-orange-50 transition">
-        Search
-      </button>
+    <a href="/dashboard"
+      class="h-11 px-6 rounded-full
+              border border-orange-200
+              bg-white/50
+              flex items-center
+              text-sm font-medium
+              hover:bg-orange-50 transition">
+      Dashboard
+    </a>
 
-    </nav>
+    <a href="/profile"
+      class="h-11 px-6 rounded-full
+              border border-orange-200
+              bg-white/50
+              flex items-center
+              text-sm font-medium
+              hover:bg-orange-50 transition">
+      Profile
+    </a>
+
+  </nav>
 
     <!-- Right: Profile -->
     <div class="flex items-center gap-3">
@@ -189,13 +202,6 @@
 
   <!-- Gallery Section -->
   <div class="max-w-6xl mx-auto px-10">
-    <div id="dropZone" class="mb-8 rounded-2xl border border-dashed border-orange-300 bg-white/60 p-6">
-      <p class="text-sm text-gray-600">Drop photos here or browse to upload.</p>
-      <input id="fileInput" type="file" accept="image/png,image/jpeg,image/heic,image/webp" multiple class="hidden" />
-      <button id="browseBtn" class="mt-4 rounded-full border border-orange-300 px-4 py-2 text-sm font-medium">Choose Photos</button>
-      <div id="fileList" class="mt-4 text-sm text-gray-600"></div>
-    </div>
-
     <div class="mb-6 flex flex-wrap items-center justify-between gap-4">
       <h3 class="text-2xl font-semibold text-gray-900">
         Your Gallery

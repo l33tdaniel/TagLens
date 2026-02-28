@@ -13,6 +13,9 @@ from markupsafe import escape
 from robyn import Request, Response, Robyn
 from robyn.templating import JinjaTemplate
 import jinja2
+import mimetypes
+import logging
+import asyncio
 
 from auth import (
     CSRF_COOKIE_NAME,
@@ -536,13 +539,10 @@ async def dashboard(request: Request) -> Response:
       <p>Your account was created on {escape(user.created_at)} UTC.</p>
     </section>
     """
-    response = _html_response(
-        _page_template(
-            title="Dashboard",
-            body=body,
-            user=user,
-            csrf_token=csrf_token,
-        )
+    response = jinja_template.render_template(
+        "base/Base.html",
+        request=request,
+        title="Dashboard",
     )
     _apply_common_cookies(
         response,
@@ -886,7 +886,7 @@ async def login_post(request: Request) -> Response:
     if not user or not verify_password(password, user.password_hash):
         csrf_token = generate_csrf_token()
         template_response = jinja_template.render_template(
-            "login/login.html",
+            "login/Login.html",
             request=request,
             title="Sign in",
             next_path=next_path,
@@ -996,9 +996,10 @@ async def register_post(request: Request) -> Response:
         errors.append("That username or email is already registered.")
         csrf_token = generate_csrf_token()
         template_response = jinja_template.render_template(
-            "login/Login.html",
+            "register/Register.html",
             request=request,
             csrf_token=csrf_token,
+            errors=errors,
         )
 
         status = 400 if not csrf_valid else 200
