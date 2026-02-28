@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ title or "Tag Lens" }}</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            creamsicle: {
+              bg: '#fff7f0',
+              primary: '#ff8c42',
+              secondary: '#ff7a2f',
+              soft: '#ffe5d1'
+            }
+          }
+        }
+      }
+    }
+  </script>
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col font-[Inter]">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between px-10 py-6">
+
+    <!-- Logo -->
+    <div class="flex items-center gap-4">
+      <div class="w-10 h-10 rounded-full 
+                  border border-orange-200 
+                  flex items-center justify-center font-semibold">
+        TL
+      </div>
+      <span class="text-lg font-medium tracking-tight">
+        Tag Lens
+      </span>
+    </div>
+
+    <!-- Auth Links -->
+    <nav class="flex items-center gap-6 text-sm font-medium">
+
+      <a href="/login"
+         class="hover:text-creamsicle-primary transition">
+        Sign In
+      </a>
+
+      <a href="/register"
+         class="px-4 py-2 rounded-full
+                bg-creamsicle-primary
+                text-white
+                hover:bg-creamsicle-secondary
+                transition">
+        Register
+      </a>
+
+    </nav>
+
+  </header>
+
+  <!-- Hero Section (Takes Space) -->
+  <main class="flex-grow flex items-center justify-center">
+
+    <div class="text-center max-w-2xl px-6">
+
+      <h1 class="text-4xl md:text-5xl font-semibold mb-6 leading-tight">
+        Organize Your Photos <br>
+        <span class="text-creamsicle-primary">Intelligently</span>
+      </h1>
+
+      <p class="text-gray-600 text-lg mb-10">
+        Upload, auto-tag with AI, and search instantly.  
+        Clean. Fast. Smart.

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dashboard | Tag Lens</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            creamsicle: {
+              bg: '#fff7f0',
+              primary: '#ff8c42',
+              secondary: '#ff7a2f',
+              soft: '#ffe5d1'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Dropzone -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" />
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col font-[Inter]">
+
+  <header class="relative flex items-center px-10 py-6">
+
+  <!-- LEFT: Logo -->
+  <div class="flex items-center gap-4">
+    <div class="w-10 h-10 rounded-full 
+                border border-orange-200 
+                flex items-center justify-center font-semibold">
+      TL
+    </div>
+
+    <span class="text-lg font-medium tracking-tight">
+      Tag Lens
+    </span>
+  </div>
+
+  <!-- CENTER: Navigation -->
+  <nav class="absolute left-1/2 -translate-x-1/2 flex items-center gap-4">
+
+    <a href="/"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Home
+    </a>
+
+    <a href="/public"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Public
+    </a>
+
+    <a href="/dashboard"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Dashboard
+    </a>
+
+    <a href="/profile"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Profile
+    </a>
+
+  </nav>
+
+  <!-- RIGHT: User Info -->
+  <div class="ml-auto flex items-center gap-4">
+
+    <span class="text-sm text-gray-600">
+      {{ user.email }}
+    </span>
+
+    <img src="https://i.pravatar.cc/40"
+         class="w-9 h-9 rounded-full border border-orange-200" />
+
+  </div>
+
+</header>
+
+  <!-- Main Dashboard -->
+  <main class="flex-grow flex justify-center px-6 pt-24 pb-20">
+
+  <div class="w-full max-w-4xl text-center">
+
+    <!-- Upload Section -->
+    <div class="flex justify-center">
+      <div class="w-full max-w-2xl">
+
+        <h2 class="text-3xl font-semibold mb-2">
+          Upload Photos
+        </h2>
+        <p class="text-gray-500 mb-8">
+          HEIC and PNG only
+        </p>
+
+        <form
+          id="photoDropzone"
+          class="dropzone border-2 border-dashed border-orange-300 
+                 rounded-2xl bg-creamsicle-soft p-12"
+          enctype="multipart/form-data">
+
+          <div class="dz-message text-gray-600">
+            Drag & drop files here
+            <div class="mt-6">
+              <span class="bg-creamsicle-primary text-white px-6 py-2 rounded-full">
+                Browse files
+              </span>
+            </div>
+          </div>
+
+        </form>
+
+        <button
+          id="uploadBtn"
+          class="mt-8 bg-creamsicle-primary text-white px-8 py-3 rounded-xl shadow hover:opacity-90 transition">
+          Upload Selected Files
+        </button>
+
+      </div>
+    </div>
+
+  </div>
+
+</main>
+
+  <!-- Dropzone Script -->
+   <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+
+  <script>
+Dropzone.autoDiscover = false;
+
+const myDropzone = new Dropzone("#photoDropzone", {
+  url: "/api/photos",
+  autoProcessQueue: false,   // 🚨 important
+  uploadMultiple: false,     // keep false since backend expects 1 JSON per request
+  parallelUploads: 5,
+  maxFilesize: 20,
+  acceptedFiles: "image/*",
+});
+</script>
+</body>
+</html>
