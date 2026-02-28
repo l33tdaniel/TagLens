@@ -31,6 +31,7 @@ class TestResponse:
 
 class TestClient:
     __test__ = False
+
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")
         self.cookie_jar = http.cookiejar.CookieJar()
@@ -56,9 +57,7 @@ class TestClient:
         if data is not None:
             encoded = urllib.parse.urlencode(data)
             body = encoded.encode("utf-8")
-            req_headers.setdefault(
-                "Content-Type", "application/x-www-form-urlencoded"
-            )
+            req_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
         if json_data is not None:
             body = json.dumps(json_data).encode("utf-8")
             req_headers.setdefault("Content-Type", "application/json")
@@ -70,7 +69,9 @@ class TestClient:
         except urllib.error.HTTPError as exc:
             response = exc
         content = response.read().decode("utf-8", errors="replace")
-        return TestResponse(status=response.code, headers=response.headers, body=content)
+        return TestResponse(
+            status=response.code, headers=response.headers, body=content
+        )
 
     def get_cookie(self, name: str) -> str | None:
         for cookie in self.cookie_jar:
@@ -91,7 +92,9 @@ def _find_free_port() -> int:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
     except PermissionError as exc:
-        raise RuntimeError("Socket binding is not permitted in this environment.") from exc
+        raise RuntimeError(
+            "Socket binding is not permitted in this environment."
+        ) from exc
 
 
 def _wait_for_server(base_url: str, proc: subprocess.Popen[str]) -> None:

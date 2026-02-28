@@ -78,8 +78,7 @@ class Database:
         """Create directories and ensure the users table exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connection() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
@@ -87,10 +86,8 @@ class Database:
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -103,10 +100,8 @@ class Database:
                     revoked_at TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NULL,
@@ -120,8 +115,7 @@ class Database:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
-                """
-            )
+                """)
             try:
                 await conn.execute(
                     "ALTER TABLE images ADD COLUMN ai_description TEXT NOT NULL DEFAULT ''"
@@ -136,15 +130,11 @@ class Database:
             except aiosqlite.OperationalError:
                 pass
             try:
-                await conn.execute(
-                    "ALTER TABLE images ADD COLUMN image_data BLOB"
-                )
+                await conn.execute("ALTER TABLE images ADD COLUMN image_data BLOB")
             except aiosqlite.OperationalError:
                 pass
             try:
-                await conn.execute(
-                    "ALTER TABLE images ADD COLUMN taken_at TEXT"
-                )
+                await conn.execute("ALTER TABLE images ADD COLUMN taken_at TEXT")
             except aiosqlite.OperationalError:
                 pass
             await conn.commit()

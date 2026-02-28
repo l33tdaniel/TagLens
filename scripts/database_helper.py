@@ -1,17 +1,17 @@
 import sqlite3
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
-import json
-from scripts.upload import *
+from scripts.upload import upload_to_b2
 
 # 1. Initialize the Embedding Model
-embed_model = SentenceTransformer('all-MiniLM-L6-v2')
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
 
 def init_db(db_path="data\\photos.db"):
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
-    
+
     cursor = conn.cursor()
 
     # Pillar 1: The Master Metadata Table
@@ -117,9 +117,10 @@ def init_db(db_path="data\\photos.db"):
     conn.commit()
     return conn
 
+
 def save_photo_to_db(conn, metadata):
     cursor = conn.cursor()
-    
+
     # 1. Insert into Master Table (is_photo hardcoded to True)
     sql = """
     INSERT INTO photos (
@@ -129,42 +130,60 @@ def save_photo_to_db(conn, metadata):
         loc_state, loc_country, caption, ocr_text
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    
+
     values = (
-        metadata["user_id"], metadata['filepath'], True, metadata['size'],
-        metadata['w'], metadata['h'], metadata['make'], metadata['model'],
-        metadata['date'], metadata['iso'], metadata['f_stop'],
-        metadata['shutter'], metadata['focal'], metadata['lat'],
-        metadata['lon'], metadata['loc_description'], metadata['loc_city'],
-        metadata['loc_state'], metadata['loc_country'], metadata['caption'],
-        metadata['ocr']
+        metadata["user_id"],
+        metadata["filepath"],
+        True,
+        metadata["size"],
+        metadata["w"],
+        metadata["h"],
+        metadata["make"],
+        metadata["model"],
+        metadata["date"],
+        metadata["iso"],
+        metadata["f_stop"],
+        metadata["shutter"],
+        metadata["focal"],
+        metadata["lat"],
+        metadata["lon"],
+        metadata["loc_description"],
+        metadata["loc_city"],
+        metadata["loc_state"],
+        metadata["loc_country"],
+        metadata["caption"],
+        metadata["ocr"],
     )
-    
+
     cursor.execute(sql, values)
     photo_id = cursor.lastrowid
 
     ext = metadata["filename"].split(".")[-1]
-    upload_to_b2(metadata['filepath'], f"{metadata['user_id']}/{photo_id}.{ext}")
+    upload_to_b2(metadata["filepath"], f"{metadata['user_id']}/{photo_id}.{ext}")
 
     # 2. Generate and Insert Embedding (Only happens for photos)
-    embedding = embed_model.encode(metadata['caption'])
-    
+    embedding = embed_model.encode(metadata["caption"])
+
     cursor.execute(
         "INSERT INTO photos_vec(photo_id, user_id, embedding) VALUES (?, ?, ?)",
-        (photo_id, metadata["user_id"], sqlite_vec.serialize_float32(embedding))
+        (photo_id, metadata["user_id"], sqlite_vec.serialize_float32(embedding)),
     )
 
     conn.commit()
     try:
-        print(f"Stored Photo: {metadata['filepath']} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}")
+        print(
+            f"Stored Photo: {metadata['filepath']} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}"
+        )
     except UnicodeEncodeError:
         print("UTF Error")
-        print(f"Stored Photo: {repr(metadata['filepath'])} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}")
+        print(
+            f"Stored Photo: {repr(metadata['filepath'])} with ID {photo_id} as {metadata['user_id']}/{photo_id}.{ext}"
+        )
 
 
 def save_video_to_db(conn, metadata):
     cursor = conn.cursor()
-    
+
     # 1. Insert Video into Master Table (is_photo hardcoded to False, most fields None)
     sql = """
     INSERT INTO photos (
@@ -174,25 +193,47 @@ def save_video_to_db(conn, metadata):
         loc_state, loc_country, caption, ocr_text
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
-    
+
     values = (
-        metadata["user_id"], metadata['filepath'], False, metadata['size'],
-        None, None, None, None, None, None, None, None, None, None, None, 
-        None, None, None, None, None, None
+        metadata["user_id"],
+        metadata["filepath"],
+        False,
+        metadata["size"],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
-    
+
     cursor.execute(sql, values)
     video_id = cursor.lastrowid
 
     # 2. Upload to B2
     ext = metadata["filename"].split(".")[-1]
-    upload_to_b2(metadata['filepath'], f"{metadata['user_id']}/{video_id}.{ext}")
+    upload_to_b2(metadata["filepath"], f"{metadata['user_id']}/{video_id}.{ext}")
 
     # Note: No embedding or vector search logic here.
 
     conn.commit()
     try:
-        print(f"Stored Video: {metadata['filepath']} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}")
+        print(
+            f"Stored Video: {metadata['filepath']} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}"
+        )
     except UnicodeEncodeError:
         print("UTF Error")
-        print(f"Stored Video: {repr(metadata['filepath'])} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}")
+        print(
+            f"Stored Video: {repr(metadata['filepath'])} with ID {video_id} as {metadata['user_id']}/{video_id}.{ext}"
+        )
