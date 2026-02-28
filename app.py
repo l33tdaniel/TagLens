@@ -776,55 +776,61 @@ async def download_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return _json_response({"error": "authentication required"}, status=401)
+
     raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
     if not raw_photo_id.isdigit():
-        logger.warning(
-            "download rejected user_id=%s reason=invalid_photo_id value=%s",
-            auth.user.id,
-            raw_photo_id,
-        )
         return _json_response({"error": "photo_id must be an integer"}, status=400)
+
     photo_id = int(raw_photo_id)
-    logger.info("download requested user_id=%s photo_id=%s", auth.user.id, photo_id)
-    try:
-        record = await db.fetch_image_for_user(photo_id, auth.user.id)
-    except Exception:
-        logger.exception(
-            "download failed user_id=%s photo_id=%s reason=db_error",
-            auth.user.id,
-            photo_id,
-        )
-        return _json_response({"error": "download failed unexpectedly"}, status=500)
+
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
     if not record:
-        logger.warning(
-            "download rejected user_id=%s photo_id=%s reason=not_found",
-            auth.user.id,
-            photo_id,
-        )
         return _json_response({"error": "photo not found"}, status=404)
-    if not record.image_data:
-        logger.warning(
-            "download rejected user_id=%s photo_id=%s reason=missing_image_data",
-            auth.user.id,
-            photo_id,
-        )
-        return _json_response({"error": "photo binary data is unavailable"}, status=404)
-    logger.info(
-        "download completed user_id=%s photo_id=%s filename=%s bytes=%s",
-        auth.user.id,
-        photo_id,
-        record.filename,
-        len(record.image_data),
+
+    # 🔥 Reconstruct B2 key
+    ext = pathlib.Path(record.filename).suffix.lower()
+    file_key = f"{auth.user.id}/{photo_id}{ext}"
+
+    # 🔥 Generate signed URL (5 minute access)
+    auth_token = bucket.get_download_authorization(
+        file_key,
+        valid_duration_in_seconds=300
     )
-    return _json_response(
-        {
-            "id": record.id,
-            "filename": record.filename,
-            "content_type": record.content_type,
-            "created_at": record.created_at,
-            "taken_at": record.taken_at,
-            "image_base64": base64.b64encode(record.image_data).decode("utf-8"),
-        }
+
+    download_base = bucket.get_download_url("")
+    signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
+
+    return _json_response({
+        "url": signed_url,
+        "filename": record.filename
+    })
+
+@app.get("/api/photos/view")
+async def view_photo(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return auth
+
+    raw_photo_id = request.query_params.get("photo_id", None)
+    if not raw_photo_id or not raw_photo_id.isdigit():
+        return Response(status_code=400, headers={}, description="Invalid photo_id")
+
+    photo_id = int(raw_photo_id)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return Response(status_code=404, headers={}, description="Not found")
+
+    ext = pathlib.Path(record.filename).suffix.lower()
+    b2_key = f"{auth.user.id}/{photo_id}{ext}"
+
+    auth_token = bucket.get_download_authorization(b2_key, valid_duration_in_seconds=300)
+    download_base = bucket.get_download_url("")
+    signed_url = f"{download_base}{b2_key}?Authorization={auth_token}"
+
+    return Response(
+        status_code=302,
+        headers={"location": signed_url},
+        description="",
     )
 
 

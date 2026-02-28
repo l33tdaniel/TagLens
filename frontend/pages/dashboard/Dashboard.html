@@ -33,125 +33,125 @@
 
 <body class="bg-creamsicle-bg min-h-screen flex flex-col font-[Inter]">
 
-  <!-- Header -->
-  <header class="flex items-center justify-between px-10 py-6">Logout
+  <header class="relative flex items-center px-10 py-6">
 
-    <!-- Logo -->
-    <div class="flex items-center gap-4">
-      <div class="w-10 h-10 rounded-full border border-orange-200 
-                  flex items-center justify-center font-semibold">
-        TL
-      </div>
-      <span class="text-lg font-medium tracking-tight">
-        Tag Lens
-      </span>
+  <!-- LEFT: Logo -->
+  <div class="flex items-center gap-4">
+    <div class="w-10 h-10 rounded-full 
+                border border-orange-200 
+                flex items-center justify-center font-semibold">
+      TL
     </div>
 
-    <!-- Auth Nav -->
-    <nav class="flex items-center gap-6 text-sm font-medium">
+    <span class="text-lg font-medium tracking-tight">
+      Tag Lens
+    </span>
+  </div>
 
-      <a href="/profile"
-         class="hover:text-creamsicle-primary transition">
-        {{ user.username }}
-      </a>
+  <!-- CENTER: Navigation -->
+  <nav class="absolute left-1/2 -translate-x-1/2 flex items-center gap-4">
 
-      <form action="/logout" method="POST">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button class="hover:text-creamsicle-primary transition">Logout</button>
-      </form>
+    <a href="/"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Home
+    </a>
 
-    </nav>
+    <a href="/public"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Public
+    </a>
 
-  </header>
+    <a href="/dashboard"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Dashboard
+    </a>
+
+    <a href="/profile"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Profile
+    </a>
+
+  </nav>
+
+  <!-- RIGHT: User Info -->
+  <div class="ml-auto flex items-center gap-4">
+
+    <span class="text-sm text-gray-600">
+      {{ user.email }}
+    </span>
+
+    <img src="https://i.pravatar.cc/40"
+         class="w-9 h-9 rounded-full border border-orange-200" />
+
+  </div>
+
+</header>
 
   <!-- Main Dashboard -->
-  <main class="flex-grow px-10 pb-16">
+  <main class="flex-grow flex justify-center px-6 pt-24 pb-20">
 
-    <!-- Welcome -->
-    <div class="mb-12">
-      <h1 class="text-3xl font-semibold mb-2">
-        Your Dashboard
-      </h1>
-      <p class="text-gray-600">
-        Upload and organize your photos.
-      </p>
-    </div>
+  <div class="w-full max-w-4xl text-center">
 
     <!-- Upload Section -->
-    <div class="mb-16">
+    <div class="flex justify-center">
+      <div class="w-full max-w-2xl">
 
-      <h2 class="text-xl font-medium mb-4">
-        Upload Photos
-      </h2>
+        <h2 class="text-3xl font-semibold mb-2">
+          Upload Photos
+        </h2>
+        <p class="text-gray-500 mb-8">
+          HEIC and PNG only
+        </p>
 
-      <form
-        id="photoDropzone"
-        class="dropzone border-2 border-dashed border-orange-200 
-              rounded-xl bg-creamsicle-soft p-6"
-        enctype="multipart/form-data">
+        <form
+          id="photoDropzone"
+          class="dropzone border-2 border-dashed border-orange-300 
+                 rounded-2xl bg-creamsicle-soft p-12"
+          enctype="multipart/form-data">
 
-        <div class="dz-message">
-          Drop photos here or click to upload.
-        </div>
+          <div class="dz-message text-gray-600">
+            Drag & drop files here
+            <div class="mt-6">
+              <span class="bg-creamsicle-primary text-white px-6 py-2 rounded-full">
+                Browse files
+              </span>
+            </div>
+          </div>
 
-      </form>
+        </form>
 
-      <button
-        id="uploadBtn"
-        class="mt-4 bg-creamsicle-primary text-white px-6 py-2 rounded-lg">
-        Upload Selected Files
-      </button>
-      <script>
-        document.getElementById("uploadBtn").addEventListener("click", async function () {
-
-          const files = myDropzone.getAcceptedFiles();
-
-          for (const file of files) {
-
-            const base64 = await new Promise((resolve) => {
-              const reader = new FileReader();
-              reader.onload = (e) => {
-                resolve(e.target.result.split(",")[1]);
-              };
-              reader.readAsDataURL(file);
-            });
-
-            await fetch("/api/photos", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                filename: file.name,
-                image_base64: base64,
-                content_type: file.type,
-              }),
-            });
-          }
-
-          window.location.reload();
-        });
-      </script>
-
-    </div>
-
-    <!-- Gallery Section -->
-    <div>
-      <h2 class="text-xl font-medium mb-6">
-        Your Photos
-      </h2>
-
-      <!-- Empty State (replace later with Jinja loop) -->
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-
-        <!-- Example placeholder -->
-        <div class="aspect-square bg-white rounded-xl shadow 
-                    flex items-center justify-center text-gray-400">
-          No photos yet
-        </div>
+        <button
+          id="uploadBtn"
+          class="mt-8 bg-creamsicle-primary text-white px-8 py-3 rounded-xl shadow hover:opacity-90 transition">
+          Upload Selected Files
+        </button>
 
       </div>
     </div>
 
-  </main>
+  </div>
+
+</main>
 
   <!-- Dropzone Script -->
    <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
