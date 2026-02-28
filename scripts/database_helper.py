@@ -2,7 +2,7 @@ import sqlite3
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
 import json
-from upload import *
+from scripts.upload import *
 
 # 1. Initialize the Embedding Model
 embed_model = SentenceTransformer('all-MiniLM-L6-v2')

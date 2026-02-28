@@ -16,3 +16,4 @@ data/*.sqlite3
 .logs/
 *.log
 test_images/
+.vscode/

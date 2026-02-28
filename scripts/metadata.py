@@ -14,7 +14,7 @@ from geopy.geocoders import Nominatim # <--- New library
 from transformers import AutoModelForCausalLM
 import torch
 import time
-from database_helper import *
+from scripts.database_helper import *
 
 import easyocr
 import numpy as np

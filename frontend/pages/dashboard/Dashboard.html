@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dashboard | Tag Lens</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            creamsicle: {
+              bg: '#fff7f0',
+              primary: '#ff8c42',
+              secondary: '#ff7a2f',
+              soft: '#ffe5d1'
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Dropzone -->
+  <link rel="stylesheet"
+        href="https://unpkg.com/dropzone@5/dist/min/dropzone.min.css" />
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col font-[Inter]">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between px-10 py-6">Logout
+
+    <!-- Logo -->
+    <div class="flex items-center gap-4">
+      <div class="w-10 h-10 rounded-full border border-orange-200 
+                  flex items-center justify-center font-semibold">
+        TL
+      </div>
+      <span class="text-lg font-medium tracking-tight">
+        Tag Lens
+      </span>
+    </div>
+
+    <!-- Auth Nav -->
+    <nav class="flex items-center gap-6 text-sm font-medium">
+
+      <a href="/profile"
+         class="hover:text-creamsicle-primary transition">
+        {{ user.username }}
+      </a>
+
+      <form action="/logout" method="POST">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="hover:text-creamsicle-primary transition">Logout</button>
+      </form>
+
+    </nav>
+
+  </header>
+
+  <!-- Main Dashboard -->
+  <main class="flex-grow px-10 pb-16">
+
+    <!-- Welcome -->
+    <div class="mb-12">
+      <h1 class="text-3xl font-semibold mb-2">
+        Your Dashboard
+      </h1>
+      <p class="text-gray-600">
+        Upload and organize your photos.
+      </p>
+    </div>
+
+    <!-- Upload Section -->
+    <div class="mb-16">
+
+      <h2 class="text-xl font-medium mb-4">
+        Upload Photos
+      </h2>
+
+      <form
+        id="photoDropzone"
+        class="dropzone border-2 border-dashed border-orange-200 
+              rounded-xl bg-creamsicle-soft p-6"
+        enctype="multipart/form-data">
+
+        <div class="dz-message">
+          Drop photos here or click to upload.
+        </div>
+
+      </form>
+
+      <button
+        id="uploadBtn"
+        class="mt-4 bg-creamsicle-primary text-white px-6 py-2 rounded-lg">
+        Upload Selected Files
+      </button>
+      <script>
+        document.getElementById("uploadBtn").addEventListener("click", async function () {
+
+          const files = myDropzone.getAcceptedFiles();
+
+          for (const file of files) {
+
+            const base64 = await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) => {
+                resolve(e.target.result.split(",")[1]);
+              };
+              reader.readAsDataURL(file);
+            });
+
+            await fetch("/api/photos", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                filename: file.name,
+                image_base64: base64,
+                content_type: file.type,
+              }),
+            });
+          }
+
+          window.location.reload();
+        });
+      </script>
+
+    </div>
+
+    <!-- Gallery Section -->
+    <div>
+      <h2 class="text-xl font-medium mb-6">
+        Your Photos
+      </h2>
+
+      <!-- Empty State (replace later with Jinja loop) -->
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+
+        <!-- Example placeholder -->
+        <div class="aspect-square bg-white rounded-xl shadow 
+                    flex items-center justify-center text-gray-400">
+          No photos yet
+        </div>
+
+      </div>
+    </div>
+
+  </main>
+
+  <!-- Dropzone Script -->
+   <script src="https://unpkg.com/dropzone@5/dist/min/dropzone.min.js"></script>
+
+  <script>
+Dropzone.autoDiscover = false;
+
+const myDropzone = new Dropzone("#photoDropzone", {
+  url: "/api/photos",
+  autoProcessQueue: false,   // 🚨 important
+  uploadMultiple: false,     // keep false since backend expects 1 JSON per request
+  parallelUploads: 5,
+  maxFilesize: 20,
+  acceptedFiles: "image/*",
+});
+</script>
+</body>
+</html>

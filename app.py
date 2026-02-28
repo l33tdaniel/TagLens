@@ -8,6 +8,10 @@ import base64
 import json
 import os
 import pathlib
+from scripts.metadata import get_complete_metadata, handle_video
+from scripts.database_helper import init_db
+from b2sdk.v2 import B2Api, InMemoryAccountInfo
+
 
 from markupsafe import escape
 from robyn import Request, Response, Robyn
@@ -47,6 +51,18 @@ jinja_template = JinjaTemplate(
 
 # Singletons used by every request
 db = Database()
+conn = init_db()
+
+KEY_ID = os.getenv("KEY_ID")
+APP_KEY = os.getenv("APP_KEY")
+BUCKET_NAME = os.getenv("BUCKET_NAME")
+
+info = InMemoryAccountInfo()
+b2_api = B2Api(info)
+
+b2_api.authorize_account("production", KEY_ID, APP_KEY)
+
+bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
 
 
 async def _ensure_database() -> None:
@@ -540,9 +556,10 @@ async def dashboard(request: Request) -> Response:
     </section>
     """
     response = jinja_template.render_template(
-        "base/Base.html",
+        "dashboard/Dashboard.html",
         request=request,
         title="Dashboard",
+        user=user,
     )
     _apply_common_cookies(
         response,
@@ -639,7 +656,6 @@ async def profile_api(request: Request) -> Response:
         }
     )
 
-
 @app.post("/api/photos")
 async def upload_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -688,11 +704,21 @@ async def upload_photo_api(request: Request) -> Response:
         content_type,
     )
     try:
+        # 1. Generate caption
         description = await asyncio.to_thread(
             _generate_image_description_with_ollama,
             image_bytes,
             filename=filename,
         )
+
+        # 2. Create temporary file (needed for metadata if required)
+        os.makedirs("temp", exist_ok=True)
+        temp_path = f"temp/{filename}"
+
+        with open(temp_path, "wb") as f:
+            f.write(image_bytes)
+
+        # 3. Insert metadata FIRST to get photo_id
         saved = await db.create_image_metadata(
             filename=filename,
             faces_json="[]",
@@ -700,15 +726,32 @@ async def upload_photo_api(request: Request) -> Response:
             user_id=auth.user.id,
             ai_description=description,
             content_type=content_type,
-            image_data=image_bytes,
+            image_data=None,  # 🚨 REMOVE blob storage
             taken_at=taken_at,
         )
-    except Exception:
-        logger.exception(
-            "upload failed user_id=%s filename=%s",
-            auth.user.id,
-            filename,
+
+        photo_id = saved.id
+        ext = pathlib.Path(filename).suffix.lower()
+        b2_key = f"{auth.user.id}/{photo_id}{ext}"
+
+        # 4. Upload to B2
+        await asyncio.to_thread(
+            bucket.upload_bytes,
+            image_bytes,
+            b2_key,
+            content_type=content_type,
         )
+
+        try:
+            bucket.get_file_info_by_name(b2_key)
+            print("B2 CONFIRMED EXISTS:", b2_key)
+        except Exception as e:
+            print("B2 NOT FOUND:", e)
+        # 5. Delete temp file
+        os.remove(temp_path)
+
+    except Exception:
+        logger.exception("upload failed user_id=%s filename=%s", auth.user.id, filename)
         return _json_response({"error": "upload failed unexpectedly"}, status=500)
     logger.info(
         "upload completed user_id=%s photo_id=%s filename=%s",
@@ -871,6 +914,7 @@ async def login_post(request: Request) -> Response:
             request=request,
             next_path=next_path,
             csrf_token=csrf_token,
+            errors=errors,
         )
 
         status = 400 if not csrf_valid else 200
@@ -1030,6 +1074,17 @@ async def logout(request: Request) -> Response:
     response = _redirect("/")
     _clear_session_cookie(response)
     return response
+
+@app.get("/debug/b2")
+def debug_b2():
+    files = []
+    for file_version, _ in bucket.ls(recursive=True):
+        files.append({
+            "file_name": file_version.file_name,
+            "size": file_version.size,
+            "upload_timestamp": file_version.upload_timestamp,
+        })
+    return {"files": files}
 
 
 if __name__ == "__main__":
