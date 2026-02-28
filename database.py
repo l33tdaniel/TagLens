@@ -56,6 +56,8 @@ class ImageRecord:
     ai_description: str
     content_type: str
     image_data: Optional[bytes]
+    thumbnail_data: Optional[bytes]
+    thumbnail_content_type: str
     taken_at: Optional[str]
     created_at: str
 
@@ -111,6 +113,8 @@ class Database:
                     ai_description TEXT NOT NULL DEFAULT '',
                     content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
                     image_data BLOB,
+                    thumbnail_data BLOB,
+                    thumbnail_content_type TEXT NOT NULL DEFAULT 'image/webp',
                     taken_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
@@ -134,7 +138,21 @@ class Database:
             except aiosqlite.OperationalError:
                 pass
             try:
-                await conn.execute("ALTER TABLE images ADD COLUMN taken_at TEXT")
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN thumbnail_data BLOB"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN thumbnail_content_type TEXT NOT NULL DEFAULT 'image/webp'"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN taken_at TEXT"
+                )
             except aiosqlite.OperationalError:
                 pass
             await conn.commit()
@@ -252,6 +270,8 @@ class Database:
         ai_description: str = "",
         content_type: str = "application/octet-stream",
         image_data: Optional[bytes] = None,
+        thumbnail_data: Optional[bytes] = None,
+        thumbnail_content_type: str = "image/webp",
         taken_at: Optional[str] = None,
     ) -> ImageRecord:
         """Insert processed image metadata and return the constructed dataclass."""
@@ -267,10 +287,12 @@ class Database:
                     ai_description,
                     content_type,
                     image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
                     taken_at,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -280,6 +302,8 @@ class Database:
                     ai_description,
                     content_type,
                     image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
                     taken_at,
                     created_at,
                 ),
@@ -298,6 +322,8 @@ class Database:
             ai_description=ai_description,
             content_type=content_type,
             image_data=image_data,
+            thumbnail_data=thumbnail_data,
+            thumbnail_content_type=thumbnail_content_type,
             taken_at=taken_at,
             created_at=created_at,
         )
@@ -326,6 +352,8 @@ class Database:
                     ai_description,
                     content_type,
                     image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
                     taken_at,
                     created_at
                 FROM images
@@ -352,6 +380,8 @@ class Database:
                 ai_description,
                 content_type,
                 image_data,
+                thumbnail_data,
+                thumbnail_content_type,
                 taken_at,
                 created_at
             FROM images
@@ -360,6 +390,24 @@ class Database:
             (image_id, user_id),
         )
         return ImageRecord(**row) if row else None
+
+    async def update_image_thumbnail(
+        self,
+        image_id: int,
+        user_id: int,
+        thumbnail_data: bytes,
+        thumbnail_content_type: str = "image/webp",
+    ) -> None:
+        async with self._connection() as conn:
+            await conn.execute(
+                """
+                UPDATE images
+                SET thumbnail_data = ?, thumbnail_content_type = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (thumbnail_data, thumbnail_content_type, image_id, user_id),
+            )
+            await conn.commit()
 
     async def delete_image_for_user(self, image_id: int, user_id: int) -> bool:
         async with self._connection() as conn:

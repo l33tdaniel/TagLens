@@ -104,7 +104,7 @@ def _wait_for_server(base_url: str, proc: subprocess.Popen[str]) -> None:
         if proc.poll() is not None:
             raise RuntimeError("Robyn server process exited early.")
         try:
-            with urllib.request.urlopen(f"{base_url}/public", timeout=1) as resp:
+            with urllib.request.urlopen(f"{base_url}/", timeout=1) as resp:
                 if resp.status == 200:
                     return
         except Exception as exc:  # pragma: no cover - transient startup errors

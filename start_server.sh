@@ -11,6 +11,32 @@ fi
 
 source ".venv/bin/activate"
 
+load_dotenv() {
+  local dotenv_path="$1"
+  [[ -f "${dotenv_path}" ]] || return 0
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "${line}" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
+      if [[ "${value}" == \"*\" && "${value}" == *\" ]]; then
+        value="${value:1:${#value}-2}"
+      elif [[ "${value}" == \'*\' && "${value}" == *\' ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      export "${key}=${value}"
+    fi
+  done < "${dotenv_path}"
+}
+
+load_dotenv ".env"
+
 if [[ -z "${ROBYN_SECRET_KEY:-}" ]]; then
   ROBYN_SECRET_KEY="$(python - <<'PY'
 import secrets

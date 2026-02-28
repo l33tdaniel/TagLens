@@ -4,28 +4,9 @@
   <meta charset="UTF-8" />
   <title>Profile</title>
 
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-
-  <script src="https://cdn.tailwindcss.com"></script>
-
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          colors: {
-            creamsicle: {
-              bg: '#fff7f0',
-              primary: '#ff8c42',
-              secondary: '#ff7a2f',
-              soft: '#ffe5d1'
-            }
-          }
-        }
-      }
-    }
-  </script>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/tailwind.generated.css">
 
   <style>
     #lightbox { transition: opacity 0.2s ease; }
@@ -37,7 +18,7 @@
 <body class="bg-creamsicle-bg min-h-screen flex flex-col">
 
   <!-- Sidebar -->
-  <div class="fixed left-6 top-1/2 -translate-y-1/2 flex flex-col items-center gap-8">
+  <div class="profile-sidebar">
     <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">📤</button>
     <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">🖼️</button>
     <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">🏷️</button>
@@ -45,26 +26,25 @@
   </div>
 
   <!-- Navbar -->
-  <header class="flex items-center justify-between px-10 py-6">
-    <div class="flex items-center gap-4">
+  <header class="app-header px-10 py-6">
+    <div class="brand-group flex items-center gap-4">
       <div class="w-10 h-10 rounded-full border border-orange-200 flex items-center justify-center font-semibold">TL</div>
       <span class="text-lg font-medium tracking-tight">Tag Lens</span>
     </div>
 
-    <nav class="flex items-center gap-4">
+    <nav class="app-nav flex items-center gap-4">
       <a href="/" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Home</a>
-      <a href="/public" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Public</a>
       <a href="/dashboard" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Dashboard</a>
       <a href="/profile" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Profile</a>
     </nav>
 
-    <div class="flex items-center gap-3">
+    <div class="user-chip flex items-center gap-3">
       <span class="text-sm text-gray-600">{{ user.username }}</span>
-      <img src="https://i.pravatar.cc/100" class="w-9 h-9 rounded-full border border-orange-200" />
+      <img src="/static/avatar.svg" class="w-9 h-9 rounded-full border border-orange-200" />
     </div>
   </header>
 
-  <main class="flex-grow pl-32 pr-12 pt-20 pb-32">
+  <main class="profile-main flex-grow pl-32 pr-12 pt-20 pb-32">
 
     <!-- Profile Card -->
     <div class="max-w-6xl mx-auto mb-20">
@@ -72,7 +52,7 @@
         <div class="flex items-center justify-between">
 
           <div class="flex items-center gap-6">
-            <img src="https://i.pravatar.cc/150" class="w-20 h-20 rounded-full border border-orange-300" />
+            <img src="/static/avatar.svg" class="w-20 h-20 rounded-full border border-orange-300" />
             <div class="text-left">
               <h2 class="text-2xl font-semibold text-gray-900">{{ user.username }}</h2>
               <p class="text-sm text-gray-500 mt-1">{{ user.email }}</p>
@@ -171,6 +151,28 @@
     </div>
   </div>
 
+  <!-- Notice modal -->
+  <div id="noticeModal"
+       class="hidden fixed inset-0 flex items-center justify-center bg-black/50 px-6"
+       style="z-index: 70;"
+       onclick="closeNoticeModal(event)">
+    <div class="w-full max-w-sm rounded-2xl border border-orange-200 bg-white p-6 shadow-2xl" onclick="event.stopPropagation()">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 id="noticeTitle" class="text-lg font-semibold text-gray-900">Notice</h3>
+        <button onclick="closeNoticeModal()"
+                class="h-8 w-8 rounded-full border border-orange-200 text-gray-500 transition hover:bg-orange-50">
+          ✕
+        </button>
+      </div>
+      <p id="noticeMessage" class="text-sm text-gray-600 mb-6"></p>
+      <button id="noticeCloseBtn"
+              onclick="closeNoticeModal()"
+              class="w-full rounded-full bg-creamsicle-primary py-2 text-sm font-medium text-white transition hover:opacity-90">
+        Close
+      </button>
+    </div>
+  </div>
+
   <script>
     let currentPhotoId = null;
 
@@ -187,18 +189,21 @@
       document.getElementById("photosCount").textContent = data.photos.length;
 
       for (const photo of data.photos) {
-        const imgSrc = `/api/photos/view?photo_id=${photo.id}`;
+        const fullSrc = `/api/photos/view?photo_id=${photo.id}`;
+        const thumbSrc = `/api/photos/thumb?photo_id=${photo.id}`;
         const caption = photo.description || photo.filename;
 
         const card = document.createElement("div");
         card.className = "relative group rounded-xl overflow-hidden cursor-pointer";
         card.dataset.photoId = photo.id;
         card.dataset.caption = caption;
-        card.dataset.src = imgSrc;
+        card.dataset.src = fullSrc;
 
         card.innerHTML = `
-          <img src="${imgSrc}"
+          <img src="${thumbSrc}"
                loading="lazy"
+               decoding="async"
+               onerror="this.onerror=null; this.src='${fullSrc}'"
                class="w-full h-64 object-cover rounded-xl transition group-hover:scale-105 duration-300" />
 
           <!-- Hover overlay -->
@@ -225,7 +230,7 @@
           </button>
         `;
 
-        card.addEventListener("click", () => openLightbox(photo.id, imgSrc, caption));
+        card.addEventListener("click", () => openLightbox(photo.id, fullSrc, caption));
         grid.appendChild(card);
       }
     }
@@ -259,8 +264,20 @@
         document.body.style.overflow = "";
         currentPhotoId = null;
         closeDeleteModal();
+        closeNoticeModal();
       }
     });
+
+    function showNotice({ title = "Notice", message = "Something happened." } = {}) {
+      document.getElementById("noticeTitle").textContent = title;
+      document.getElementById("noticeMessage").textContent = message;
+      document.getElementById("noticeModal").classList.remove("hidden");
+    }
+
+    function closeNoticeModal(event) {
+      if (event && event.target !== document.getElementById("noticeModal")) return;
+      document.getElementById("noticeModal").classList.add("hidden");
+    }
 
     // ── Delete ────────────────────────────────────────────────
     function deleteCurrentPhoto() {
@@ -293,7 +310,10 @@
 
         if (!res.ok) {
           const err = await res.json();
-          alert(err.error || "Delete failed.");
+          showNotice({
+            title: "Delete Failed",
+            message: err.error || "Delete failed.",
+          });
           return;
         }
 
@@ -308,7 +328,10 @@
         await loadGallery();
 
       } catch (e) {
-        alert("Something went wrong.");
+        showNotice({
+          title: "Request Failed",
+          message: "Something went wrong.",
+        });
       }
     }
 

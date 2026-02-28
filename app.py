@@ -1,13 +1,13 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
 import base64
+import io
 import json
 import os
 import pathlib
-from scripts.database_helper import init_db
 from b2sdk.v2 import B2Api, InMemoryAccountInfo
 
 
@@ -17,6 +17,13 @@ from robyn.templating import JinjaTemplate
 import mimetypes
 import logging
 import asyncio
+try:
+    from PIL import Image, UnidentifiedImageError
+except ImportError:  # pragma: no cover - optional dependency in some environments
+    Image = None
+
+    class UnidentifiedImageError(Exception):
+        pass
 
 from auth import (
     CSRF_COOKIE_NAME,
@@ -41,31 +48,51 @@ app = Robyn(__file__)
 logger = logging.getLogger(__name__)
 
 current_file_path = pathlib.Path(__file__).parent.resolve()
+static_dir = current_file_path / "frontend" / "static"
 
 jinja_template = JinjaTemplate(os.path.join(current_file_path, "frontend/pages"))
 
 # Singletons used by every request
 db = Database()
-conn = init_db()
 
 KEY_ID = os.getenv("KEY_ID")
-APP_KEY = os.getenv("APP_KEY")
+APP_KEY = os.getenv("APP_KEY") or os.getenv("API_KEY")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 
-info = InMemoryAccountInfo()
-b2_api = B2Api(info)
+bucket = None
 
-b2_api.authorize_account("production", KEY_ID, APP_KEY)
 
-bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
+def _initialize_b2_bucket() -> None:
+    """Initialize Backblaze bucket access when credentials are configured."""
+    global bucket
+    if not KEY_ID or not APP_KEY or not BUCKET_NAME:
+        logger.warning(
+            "Backblaze disabled: missing KEY_ID/API_KEY(APP_KEY)/BUCKET_NAME."
+        )
+        return
+    try:
+        info = InMemoryAccountInfo()
+        b2_api = B2Api(info)
+        b2_api.authorize_account("production", KEY_ID, APP_KEY)
+        bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
+    except Exception as exc:  # pragma: no cover - external dependency failure
+        bucket = None
+        logger.warning("Backblaze disabled: authorization failed (%s)", exc)
 
 
 async def _ensure_database() -> None:
     """Prepare the sqlite file before handling the first request."""
     await db.initialize()
+    _initialize_b2_bucket()
 
 
 app.startup_handler(_ensure_database)
+app.serve_directory(
+    route="/static",
+    directory_path=str(static_dir),
+    show_files_listing=False,
+    index_file=None,
+)
 
 
 @dataclass
@@ -135,12 +162,22 @@ def _json_data(request: Request) -> dict:
 
 
 def _now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return _utc_now().isoformat()
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _is_expired(expires_at: str) -> bool:
     try:
-        return datetime.fromisoformat(expires_at) <= datetime.utcnow()
+        return _as_utc(datetime.fromisoformat(expires_at)) <= _utc_now()
     except ValueError:
         return True
 
@@ -152,16 +189,42 @@ def _get_or_create_csrf_token(request: Request) -> Tuple[str, bool]:
     return generate_csrf_token(), True
 
 
+def _cookie_header(name: str, value: str, settings: dict) -> str:
+    parts = [f"{name}={value}"]
+    max_age = settings.get("max_age")
+    if max_age is not None:
+        parts.append(f"Max-Age={int(max_age)}")
+    expires = settings.get("expires")
+    if expires:
+        parts.append(f"Expires={expires}")
+    path = settings.get("path")
+    if path:
+        parts.append(f"Path={path}")
+    same_site = settings.get("same_site")
+    if same_site:
+        normalized = str(same_site).strip().capitalize()
+        parts.append(f"SameSite={normalized}")
+    if settings.get("secure"):
+        parts.append("Secure")
+    if settings.get("http_only"):
+        parts.append("HttpOnly")
+    return "; ".join(parts)
+
+
+def _append_set_cookie(response: Response, name: str, value: str, settings: dict) -> None:
+    response.headers.append("Set-Cookie", _cookie_header(name, value, settings))
+
+
 def _set_csrf_cookie(response: Response, token: str) -> None:
-    response.set_cookie(CSRF_COOKIE_NAME, token, **csrf_cookie_settings())
+    _append_set_cookie(response, CSRF_COOKIE_NAME, token, csrf_cookie_settings())
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
-    response.set_cookie(SESSION_COOKIE_NAME, token, **cookie_settings())
+    _append_set_cookie(response, SESSION_COOKIE_NAME, token, cookie_settings())
 
 
 def _clear_session_cookie(response: Response) -> None:
-    response.set_cookie(SESSION_COOKIE_NAME, "", **cookie_clear_settings())
+    _append_set_cookie(response, SESSION_COOKIE_NAME, "", cookie_clear_settings())
 
 
 def _apply_common_cookies(
@@ -188,7 +251,7 @@ def _html_response(body: str, *, status: int = 200) -> Response:
 
 def _build_nav(user: Optional[UserRecord], csrf_token: Optional[str]) -> str:
     """Render the shared navigation bar shown at the top of every page."""
-    links = ['<a href="/">Home</a>', '<a href="/public">Public</a>']
+    links = ['<a href="/">Home</a>']
     if user:
         logout_html = ""
         if csrf_token:
@@ -351,6 +414,71 @@ def _parse_taken_at(value: object) -> Optional[str]:
     return parsed.isoformat()
 
 
+def _generate_thumbnail_webp(
+    image_bytes: bytes,
+    *,
+    max_size: tuple[int, int] = (480, 480),
+    quality: int = 70,
+) -> bytes:
+    if Image is None:
+        raise RuntimeError("Pillow is required for thumbnail generation")
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            image.thumbnail(max_size)
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGB")
+            buffer = io.BytesIO()
+            image.save(buffer, format="WEBP", quality=quality, optimize=True)
+            thumbnail = buffer.getvalue()
+    except UnidentifiedImageError as exc:
+        raise ValueError("unsupported image payload") from exc
+    if not thumbnail:
+        raise ValueError("empty thumbnail generated")
+    return thumbnail
+
+
+def _photo_file_key(user_id: int, photo_id: int, filename: str) -> str:
+    ext = pathlib.Path(filename).suffix.lower()
+    return f"{user_id}/{photo_id}{ext}"
+
+
+def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Optional[bytes]:
+    if bucket is None:
+        return None
+    file_key = _photo_file_key(user_id, photo_id, filename)
+    auth_token = bucket.get_download_authorization(
+        file_key,
+        valid_duration_in_seconds=300,
+    )
+    download_base = bucket.get_download_url("")
+    signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
+    with urllib_request.urlopen(signed_url, timeout=30) as response:
+        return response.read()
+
+
+def _photo_view_response(user_id: int, photo_id: int, record) -> Response:
+    if record.image_data:
+        return Response(
+            status_code=200,
+            headers={"content-type": record.content_type},
+            description=record.image_data,
+        )
+    if bucket is None:
+        return Response(status_code=503, headers={}, description="Storage unavailable")
+    b2_key = _photo_file_key(user_id, photo_id, record.filename)
+    auth_token = bucket.get_download_authorization(
+        b2_key, valid_duration_in_seconds=300
+    )
+    download_base = bucket.get_download_url("")
+    signed_url = f"{download_base}{b2_key}?Authorization={auth_token}"
+
+    return Response(
+        status_code=302,
+        headers={"location": signed_url},
+        description="",
+    )
+
+
 def _generate_image_description_with_ollama(
     image_bytes: bytes,
     *,
@@ -506,34 +634,6 @@ async def home(request: Request) -> Response:
     return response
 
 
-@app.get("/public")
-async def public_page(request: Request) -> Response:
-    """Informational route accessible to unauthenticated visitors."""
-    context = await _get_auth_context(request)
-    csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    body = """
-    <section>
-      <h2>Public area</h2>
-      <p>Anyone can reach this without signing in.</p>
-    </section>
-    """
-    response = _html_response(
-        _page_template(
-            title="Public",
-            body=body,
-            user=context.user,
-            csrf_token=csrf_token,
-        )
-    )
-    _apply_common_cookies(
-        response,
-        clear_session=context.clear_cookie,
-        csrf_token=csrf_token,
-        set_csrf=set_csrf,
-    )
-    return response
-
-
 @app.get("/dashboard")
 async def dashboard(request: Request) -> Response:
     """Private dashboard that requires a valid session cookie."""
@@ -591,12 +691,23 @@ async def profile(request: Request) -> Response:
 
 @app.get("/UserProfile.js")
 async def profile_js(_: Request) -> Response:
-    with open("frontend/pages/user_profile/Userprofile.js", "r", encoding="utf-8") as f:
-        content = f.read()
+    content = "console.info('UserProfile.js placeholder loaded.');"
     return Response(
         status_code=200,
         headers={"content-type": "application/javascript; charset=utf-8"},
         description=content,
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon(_: Request) -> Response:
+    favicon_path = static_dir / "favicon.svg"
+    if not favicon_path.exists():
+        return Response(status_code=404, headers={}, description="")
+    return Response(
+        status_code=200,
+        headers={"content-type": "image/svg+xml"},
+        description=favicon_path.read_text(encoding="utf-8"),
     )
 
 
@@ -689,6 +800,16 @@ async def upload_photo_api(request: Request) -> Response:
         len(image_bytes),
         content_type,
     )
+    thumbnail_data: Optional[bytes] = None
+    try:
+        thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
+    except Exception:
+        logger.warning(
+            "upload thumbnail generation skipped user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+            exc_info=True,
+        )
     try:
         # 1. Generate caption
         description = await asyncio.to_thread(
@@ -696,15 +817,18 @@ async def upload_photo_api(request: Request) -> Response:
             image_bytes,
             filename=filename,
         )
+    except Exception:
+        logger.exception(
+            "upload caption generation failed user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+        )
+        return _json_response({"error": "upload failed unexpectedly"}, status=500)
 
-        # 2. Create temporary file (needed for metadata if required)
-        os.makedirs("temp", exist_ok=True)
-        temp_path = f"temp/{filename}"
-
-        with open(temp_path, "wb") as f:
-            f.write(image_bytes)
-
-        # 3. Insert metadata FIRST to get photo_id
+    try:
+        # 2. Insert metadata first to get photo_id.
+        # Keep blob data only when B2 is unavailable.
+        image_blob = image_bytes if bucket is None else None
         saved = await db.create_image_metadata(
             filename=filename,
             faces_json="[]",
@@ -712,32 +836,37 @@ async def upload_photo_api(request: Request) -> Response:
             user_id=auth.user.id,
             ai_description=description,
             content_type=content_type,
-            image_data=None,  # 🚨 REMOVE blob storage
+            image_data=image_blob,
+            thumbnail_data=thumbnail_data,
+            thumbnail_content_type="image/webp",
             taken_at=taken_at,
         )
-
-        photo_id = saved.id
-        ext = pathlib.Path(filename).suffix.lower()
-        b2_key = f"{auth.user.id}/{photo_id}{ext}"
-
-        # 4. Upload to B2
-        await asyncio.to_thread(
-            bucket.upload_bytes,
-            image_bytes,
-            b2_key,
-            content_type=content_type,
-        )
-
-        try:
-            bucket.get_file_info_by_name(b2_key)
-            print("B2 CONFIRMED EXISTS:", b2_key)
-        except Exception as e:
-            print("B2 NOT FOUND:", e)
-        # 5. Delete temp file
-        os.remove(temp_path)
-
     except Exception:
-        logger.exception("upload failed user_id=%s filename=%s", auth.user.id, filename)
+        logger.exception(
+            "upload database write failed user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+        )
+        return _json_response({"error": "upload failed unexpectedly"}, status=500)
+
+    try:
+        photo_id = saved.id
+        if bucket is not None:
+            ext = pathlib.Path(filename).suffix.lower()
+            b2_key = f"{auth.user.id}/{photo_id}{ext}"
+            await asyncio.to_thread(
+                bucket.upload_bytes,
+                image_bytes,
+                b2_key,
+                content_type=content_type,
+            )
+    except Exception:
+        logger.exception(
+            "upload file storage failed user_id=%s photo_id=%s filename=%s",
+            auth.user.id,
+            saved.id,
+            filename,
+        )
         return _json_response({"error": "upload failed unexpectedly"}, status=500)
     logger.info(
         "upload completed user_id=%s photo_id=%s filename=%s",
@@ -773,20 +902,30 @@ async def download_photo_api(request: Request) -> Response:
     if not record:
         return _json_response({"error": "photo not found"}, status=404)
 
-    # 🔥 Reconstruct B2 key
-    ext = pathlib.Path(record.filename).suffix.lower()
-    file_key = f"{auth.user.id}/{photo_id}{ext}"
-
-    # 🔥 Generate signed URL (5 minute access)
+    if record.image_data:
+        return _json_response(
+            {
+                "filename": record.filename,
+                "content_type": record.content_type,
+                "image_base64": base64.b64encode(record.image_data).decode("utf-8"),
+            }
+        )
+    if bucket is None:
+        return _json_response({"error": "file storage unavailable"}, status=503)
+    file_key = _photo_file_key(auth.user.id, photo_id, record.filename)
     auth_token = bucket.get_download_authorization(
-        file_key, valid_duration_in_seconds=300
+        file_key,
+        valid_duration_in_seconds=300,
     )
-
     download_base = bucket.get_download_url("")
     signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
-
-    return _json_response({"url": signed_url, "filename": record.filename})
-
+    return _json_response(
+        {
+            "url": signed_url,
+            "filename": record.filename,
+            "content_type": record.content_type,
+        }
+    )
 
 @app.get("/api/photos/view")
 async def view_photo(request: Request) -> Response:
@@ -803,20 +942,77 @@ async def view_photo(request: Request) -> Response:
     if not record:
         return Response(status_code=404, headers={}, description="Not found")
 
-    ext = pathlib.Path(record.filename).suffix.lower()
-    b2_key = f"{auth.user.id}/{photo_id}{ext}"
+    return _photo_view_response(auth.user.id, photo_id, record)
 
-    auth_token = bucket.get_download_authorization(
-        b2_key, valid_duration_in_seconds=300
-    )
-    download_base = bucket.get_download_url("")
-    signed_url = f"{download_base}{b2_key}?Authorization={auth_token}"
+@app.get("/api/photos/thumb")
+async def view_photo_thumbnail(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return auth
 
-    return Response(
-        status_code=302,
-        headers={"location": signed_url},
-        description="",
-    )
+    raw_photo_id = request.query_params.get("photo_id", None)
+    if not raw_photo_id or not raw_photo_id.isdigit():
+        return Response(status_code=400, headers={}, description="Invalid photo_id")
+
+    photo_id = int(raw_photo_id)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return Response(status_code=404, headers={}, description="Not found")
+
+    if record.thumbnail_data:
+        return Response(
+            status_code=200,
+            headers={
+                "content-type": record.thumbnail_content_type or "image/webp",
+                "cache-control": "private, max-age=86400",
+            },
+            description=record.thumbnail_data,
+        )
+    image_bytes: Optional[bytes] = record.image_data
+    if image_bytes is None:
+        try:
+            image_bytes = await asyncio.to_thread(
+                _fetch_bucket_image_bytes,
+                auth.user.id,
+                photo_id,
+                record.filename,
+            )
+        except Exception:
+            logger.warning(
+                "thumbnail source fetch failed user_id=%s photo_id=%s",
+                auth.user.id,
+                photo_id,
+                exc_info=True,
+            )
+            image_bytes = None
+
+    if image_bytes:
+        try:
+            thumbnail_data = await asyncio.to_thread(
+                _generate_thumbnail_webp, image_bytes
+            )
+            await db.update_image_thumbnail(
+                photo_id,
+                auth.user.id,
+                thumbnail_data,
+                "image/webp",
+            )
+            return Response(
+                status_code=200,
+                headers={
+                    "content-type": "image/webp",
+                    "cache-control": "private, max-age=86400",
+                },
+                description=thumbnail_data,
+            )
+        except Exception:
+            logger.warning(
+                "thumbnail generation failed user_id=%s photo_id=%s",
+                auth.user.id,
+                photo_id,
+                exc_info=True,
+            )
+    return _photo_view_response(auth.user.id, photo_id, record)
 
 
 @app.delete("/api/photos")
@@ -905,14 +1101,12 @@ async def login_post(request: Request) -> Response:
             request=request,
             next_path=next_path,
             csrf_token=csrf_token,
-            errors=errors,
+            messages=errors,
         )
-
-        status = 400 if not csrf_valid else 200
 
         response = Response(
             description=template_response.description,
-            status_code=status,
+            status_code=200,
             headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
@@ -945,7 +1139,7 @@ async def login_post(request: Request) -> Response:
         "x-forwarded-for"
     )
     expires_at = (
-        datetime.utcnow() + timedelta(seconds=session_expiration())
+        _utc_now() + timedelta(seconds=session_expiration())
     ).isoformat()
     await db.create_session(
         user_id=user.id,
@@ -1013,13 +1207,12 @@ async def register_post(request: Request) -> Response:
             "register/Register.html",
             request=request,
             csrf_token=csrf_token,
+            messages=errors,
         )
-
-        status = 400 if not csrf_valid else 200
 
         response = Response(
             description=template_response.description,
-            status_code=status,
+            status_code=200,
             headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
@@ -1035,14 +1228,12 @@ async def register_post(request: Request) -> Response:
             "register/Register.html",
             request=request,
             csrf_token=csrf_token,
-            errors=errors,
+            messages=errors,
         )
-
-        status = 400 if not csrf_valid else 200
 
         response = Response(
             description=template_response.description,
-            status_code=status,
+            status_code=200,
             headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
@@ -1070,6 +1261,8 @@ async def logout(request: Request) -> Response:
 
 @app.get("/debug/b2")
 def debug_b2():
+    if bucket is None:
+        return {"enabled": False, "files": []}
     files = []
     for file_version, _ in bucket.ls(recursive=True):
         files.append(
