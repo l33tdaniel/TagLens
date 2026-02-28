@@ -69,8 +69,6 @@ def session_expiration(max_age: timedelta | int = DEFAULT_MAX_AGE) -> int:
     return int(max_age.total_seconds() if isinstance(max_age, timedelta) else max_age)
 
 
-
-
 def hash_password(plain: str) -> str:
     """Wrap passlib's bcrypt hash generator."""
     return pwd_context.hash(plain)

@@ -1,14 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Tuple
-from urllib import response
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
 import base64
 import json
 import os
 import pathlib
-from scripts.metadata import get_complete_metadata, handle_video
 from scripts.database_helper import init_db
 from b2sdk.v2 import B2Api, InMemoryAccountInfo
 
@@ -16,7 +14,6 @@ from b2sdk.v2 import B2Api, InMemoryAccountInfo
 from markupsafe import escape
 from robyn import Request, Response, Robyn
 from robyn.templating import JinjaTemplate
-import jinja2
 import mimetypes
 import logging
 import asyncio
@@ -45,9 +42,7 @@ logger = logging.getLogger(__name__)
 
 current_file_path = pathlib.Path(__file__).parent.resolve()
 
-jinja_template = JinjaTemplate(
-    os.path.join(current_file_path, "frontend/pages")
-)
+jinja_template = JinjaTemplate(os.path.join(current_file_path, "frontend/pages"))
 
 # Singletons used by every request
 db = Database()
@@ -548,13 +543,6 @@ async def dashboard(request: Request) -> Response:
     context = auth
     user = context.user
     csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    body = f"""
-    <section>
-      <h2>Dashboard</h2>
-      <p>Welcome back, {escape(user.username)}.</p>
-      <p>Your account was created on {escape(user.created_at)} UTC.</p>
-    </section>
-    """
     response = jinja_template.render_template(
         "dashboard/Dashboard.html",
         request=request,
@@ -570,7 +558,6 @@ async def dashboard(request: Request) -> Response:
     return response
 
 
-
 @app.get("/profile")
 async def profile(request: Request) -> Response:
     """Show account metadata for the signed-in user."""
@@ -580,23 +567,19 @@ async def profile(request: Request) -> Response:
     context = auth
     user = context.user
     csrf_token, set_csrf = _get_or_create_csrf_token(request)
-    
 
     created_at = datetime.fromisoformat(user.created_at)
 
     user_dict = {
-    "username": user.username,
-    "email": user.email,
-    "created_at": created_at
+        "username": user.username,
+        "email": user.email,
+        "created_at": created_at,
     }
 
-    
     response = jinja_template.render_template(
-        "user_profile/UserProfile.html",
-        request=request,
-        user=user_dict
+        "user_profile/UserProfile.html", request=request, user=user_dict
     )
-    
+
     _apply_common_cookies(
         response,
         clear_session=context.clear_cookie,
@@ -626,7 +609,9 @@ async def profile_api(request: Request) -> Response:
     sort_by = str(request.query_params.get("sort_by", "uploaded")).strip().lower()
     order = str(request.query_params.get("order", "desc")).strip().lower()
     if sort_by not in {"uploaded", "taken"}:
-        return _json_response({"error": "sort_by must be uploaded or taken"}, status=400)
+        return _json_response(
+            {"error": "sort_by must be uploaded or taken"}, status=400
+        )
     if order not in {"asc", "desc"}:
         return _json_response({"error": "order must be asc or desc"}, status=400)
     images = await db.list_images_for_user(user.id, sort_by=sort_by, order=order)
@@ -655,6 +640,7 @@ async def profile_api(request: Request) -> Response:
             ],
         }
     )
+
 
 @app.post("/api/photos")
 async def upload_photo_api(request: Request) -> Response:
@@ -793,17 +779,14 @@ async def download_photo_api(request: Request) -> Response:
 
     # 🔥 Generate signed URL (5 minute access)
     auth_token = bucket.get_download_authorization(
-        file_key,
-        valid_duration_in_seconds=300
+        file_key, valid_duration_in_seconds=300
     )
 
     download_base = bucket.get_download_url("")
     signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
 
-    return _json_response({
-        "url": signed_url,
-        "filename": record.filename
-    })
+    return _json_response({"url": signed_url, "filename": record.filename})
+
 
 @app.get("/api/photos/view")
 async def view_photo(request: Request) -> Response:
@@ -823,7 +806,9 @@ async def view_photo(request: Request) -> Response:
     ext = pathlib.Path(record.filename).suffix.lower()
     b2_key = f"{auth.user.id}/{photo_id}{ext}"
 
-    auth_token = bucket.get_download_authorization(b2_key, valid_duration_in_seconds=300)
+    auth_token = bucket.get_download_authorization(
+        b2_key, valid_duration_in_seconds=300
+    )
     download_base = bucket.get_download_url("")
     signed_url = f"{download_base}{b2_key}?Authorization={auth_token}"
 
@@ -928,7 +913,7 @@ async def login_post(request: Request) -> Response:
         response = Response(
             description=template_response.description,
             status_code=status,
-            headers=template_response.headers
+            headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -941,13 +926,13 @@ async def login_post(request: Request) -> Response:
             title="Sign in",
             next_path=next_path,
             csrf_token=csrf_token,
-            messages=["Invalid credentials."]
+            messages=["Invalid credentials."],
         )
 
         response = Response(
             description=template_response.description,
             status_code=401,
-            headers=template_response.headers
+            headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -988,7 +973,8 @@ async def register_get(request: Request) -> Response:
     response = jinja_template.render_template(
         "register/Register.html",
         request=request,
-        csrf_token=csrf_token,)
+        csrf_token=csrf_token,
+    )
     _apply_common_cookies(
         response,
         clear_session=context.clear_cookie,
@@ -1034,7 +1020,7 @@ async def register_post(request: Request) -> Response:
         response = Response(
             description=template_response.description,
             status_code=status,
-            headers=template_response.headers
+            headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -1057,7 +1043,7 @@ async def register_post(request: Request) -> Response:
         response = Response(
             description=template_response.description,
             status_code=status,
-            headers=template_response.headers
+            headers=template_response.headers,
         )
         _set_csrf_cookie(response, csrf_token)
         return response
@@ -1081,15 +1067,18 @@ async def logout(request: Request) -> Response:
     _clear_session_cookie(response)
     return response
 
+
 @app.get("/debug/b2")
 def debug_b2():
     files = []
     for file_version, _ in bucket.ls(recursive=True):
-        files.append({
-            "file_name": file_version.file_name,
-            "size": file_version.size,
-            "upload_timestamp": file_version.upload_timestamp,
-        })
+        files.append(
+            {
+                "file_name": file_version.file_name,
+                "size": file_version.size,
+                "upload_timestamp": file_version.upload_timestamp,
+            }
+        )
     return {"files": files}
 
 

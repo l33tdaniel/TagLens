@@ -17,7 +17,9 @@ def _extract_csrf_token(html: str) -> str:
     return match.group(1)
 
 
-def _register_user(client: TestClient, username: str, email: str, password: str) -> None:
+def _register_user(
+    client: TestClient, username: str, email: str, password: str
+) -> None:
     register_page = client.request("GET", "/register")
     csrf_token = _extract_csrf_token(register_page.body)
     response = client.request(
@@ -120,8 +122,7 @@ def test_logout_clears_session_and_blocks_dashboard(server: ServerInfo) -> None:
     assert response.status in {302, 303}
     set_cookies = response.headers.get_all("Set-Cookie") or []
     assert any(
-        header.lower().startswith("taglens_session=")
-        and "max-age=0" in header.lower()
+        header.lower().startswith("taglens_session=") and "max-age=0" in header.lower()
         for header in set_cookies
     )
     redirect = client.request("GET", "/dashboard")
@@ -150,8 +151,7 @@ def test_expired_session_is_revoked_and_cleared(server: ServerInfo) -> None:
     assert response.status in {302, 303}
     set_cookies = response.headers.get_all("Set-Cookie") or []
     assert any(
-        header.lower().startswith("taglens_session=")
-        and "max-age=0" in header.lower()
+        header.lower().startswith("taglens_session=") and "max-age=0" in header.lower()
         for header in set_cookies
     )
 
