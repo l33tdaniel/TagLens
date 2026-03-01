@@ -4,10 +4,14 @@ from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
 import base64
+import collections
 import io
 import json
 import os
 import pathlib
+import re
+import threading
+import time
 from b2sdk.v2 import B2Api, InMemoryAccountInfo
 
 
@@ -51,6 +55,32 @@ current_file_path = pathlib.Path(__file__).parent.resolve()
 static_dir = current_file_path / "frontend" / "static"
 
 jinja_template = JinjaTemplate(os.path.join(current_file_path, "frontend/pages"))
+
+class RateLimiter:
+    """Simple in-memory sliding-window rate limiter keyed by IP."""
+
+    def __init__(self, max_requests: int, window_seconds: int) -> None:
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._hits: dict[str, collections.deque] = {}
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            dq = self._hits.setdefault(key, collections.deque())
+            while dq and dq[0] <= now - self.window:
+                dq.popleft()
+            if len(dq) >= self.max_requests:
+                return False
+            dq.append(now)
+            return True
+
+
+# Per-route limiters
+_login_limiter = RateLimiter(max_requests=10, window_seconds=60)
+_register_limiter = RateLimiter(max_requests=5, window_seconds=60)
+_upload_limiter = RateLimiter(max_requests=30, window_seconds=60)
 
 # Singletons used by every request
 db = Database()
@@ -187,6 +217,22 @@ def _get_or_create_csrf_token(request: Request) -> Tuple[str, bool]:
     if token:
         return token, False
     return generate_csrf_token(), True
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP for rate limiting."""
+    return (
+        getattr(request, "ip_addr", None)
+        or request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or "unknown"
+    )
+
+
+def _verify_api_csrf(request: Request) -> bool:
+    """Validate CSRF for JSON API requests using X-CSRF-Token header."""
+    csrf_cookie = _get_cookie_value(request, CSRF_COOKIE_NAME)
+    csrf_header = request.headers.get("x-csrf-token")
+    return verify_csrf_token(csrf_cookie, csrf_header)
 
 
 def _cookie_header(name: str, value: str, settings: dict) -> str:
@@ -758,8 +804,17 @@ async def upload_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    if not _upload_limiter.is_allowed(_client_ip(request)):
+        return _json_response({"error": "too many uploads, try again later"}, status=429)
     payload = _json_data(request)
-    filename = str(payload.get("filename", "")).strip()
+    raw_filename = str(payload.get("filename", "")).strip()
+    # Keep only the basename and strip unsafe characters
+    filename = os.path.basename(raw_filename)
+    filename = re.sub(r"[^\w.\-() ]", "_", filename).strip()
+    if not filename:
+        filename = "upload"
     image_base64 = str(payload.get("image_base64", "")).strip()
     taken_at = _parse_taken_at(payload.get("taken_at"))
     content_type = _normalize_content_type(
@@ -793,6 +848,15 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
         )
         return _json_response({"error": "empty image payload"}, status=400)
+    MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        logger.warning(
+            "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
+            auth.user.id,
+            filename,
+            len(image_bytes),
+        )
+        return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
     logger.info(
         "upload started user_id=%s filename=%s bytes=%s content_type=%s",
         auth.user.id,
@@ -867,6 +931,11 @@ async def upload_photo_api(request: Request) -> Response:
             saved.id,
             filename,
         )
+        try:
+            await db.delete_image_for_user(saved.id, auth.user.id)
+            logger.info("rolled back orphaned DB record photo_id=%s", saved.id)
+        except Exception:
+            logger.exception("rollback failed for photo_id=%s", saved.id)
         return _json_response({"error": "upload failed unexpectedly"}, status=500)
     logger.info(
         "upload completed user_id=%s photo_id=%s filename=%s",
@@ -1020,6 +1089,8 @@ async def delete_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
     payload = _json_data(request)
     photo_id_raw = str(payload.get("photo_id", "")).strip()
     if not photo_id_raw.isdigit():
@@ -1080,6 +1151,8 @@ async def login_get(request: Request) -> Response:
 @app.post("/login")
 async def login_post(request: Request) -> Response:
     """Validate credentials and issue a session token when authentication succeeds."""
+    if not _login_limiter.is_allowed(_client_ip(request)):
+        return _html_response("<p>Too many login attempts. Please try again later.</p>", status=429)
     form = _form_data(request)
     email = (form.get("email") or "").strip().lower()
     password = form.get("password") or ""
@@ -1181,6 +1254,8 @@ async def register_get(request: Request) -> Response:
 @app.post("/register")
 async def register_post(request: Request) -> Response:
     """Process registration data, enforce validation, and persist new users."""
+    if not _register_limiter.is_allowed(_client_ip(request)):
+        return _html_response("<p>Too many registration attempts. Please try again later.</p>", status=429)
     form = _form_data(request)
     username = (form.get("username") or "").strip()
     email = (form.get("email") or "").strip().lower()
@@ -1257,22 +1332,6 @@ async def logout(request: Request) -> Response:
     response = _redirect("/")
     _clear_session_cookie(response)
     return response
-
-
-@app.get("/debug/b2")
-def debug_b2():
-    if bucket is None:
-        return {"enabled": False, "files": []}
-    files = []
-    for file_version, _ in bucket.ls(recursive=True):
-        files.append(
-            {
-                "file_name": file_version.file_name,
-                "size": file_version.size,
-                "upload_timestamp": file_version.upload_timestamp,
-            }
-        )
-    return {"files": files}
 
 
 if __name__ == "__main__":
