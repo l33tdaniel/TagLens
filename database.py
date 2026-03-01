@@ -53,6 +53,12 @@ class ImageRecord:
     filename: str
     faces_json: str
     ocr_text: str
+    ai_description: str
+    content_type: str
+    image_data: Optional[bytes]
+    thumbnail_data: Optional[bytes]
+    thumbnail_content_type: str
+    taken_at: Optional[str]
     created_at: str
 
 
@@ -74,8 +80,7 @@ class Database:
         """Create directories and ensure the users table exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connection() as conn:
-            await conn.execute(
-                """
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT NOT NULL UNIQUE,
@@ -83,10 +88,8 @@ class Database:
                     password_hash TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 )
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
@@ -99,21 +102,59 @@ class Database:
                     revoked_at TEXT,
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
-                """
-            )
-            await conn.execute(
-                """
+                """)
+            await conn.execute("""
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NULL,
                     filename TEXT NOT NULL,
                     faces_json TEXT NOT NULL,
                     ocr_text TEXT NOT NULL,
+                    ai_description TEXT NOT NULL DEFAULT '',
+                    content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                    image_data BLOB,
+                    thumbnail_data BLOB,
+                    thumbnail_content_type TEXT NOT NULL DEFAULT 'image/webp',
+                    taken_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
-                """
-            )
+                """)
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN ai_description TEXT NOT NULL DEFAULT ''"
+                )
+            except aiosqlite.OperationalError:
+                # Existing databases will already have this column after first migration.
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN content_type TEXT NOT NULL DEFAULT 'application/octet-stream'"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute("ALTER TABLE images ADD COLUMN image_data BLOB")
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN thumbnail_data BLOB"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN thumbnail_content_type TEXT NOT NULL DEFAULT 'image/webp'"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE images ADD COLUMN taken_at TEXT"
+                )
+            except aiosqlite.OperationalError:
+                pass
             await conn.commit()
 
     async def fetch_one(
@@ -221,17 +262,51 @@ class Database:
         )
 
     async def create_image_metadata(
-        self, filename: str, faces_json: str, ocr_text: str, user_id: Optional[int] = None
+        self,
+        filename: str,
+        faces_json: str,
+        ocr_text: str,
+        user_id: Optional[int] = None,
+        ai_description: str = "",
+        content_type: str = "application/octet-stream",
+        image_data: Optional[bytes] = None,
+        thumbnail_data: Optional[bytes] = None,
+        thumbnail_content_type: str = "image/webp",
+        taken_at: Optional[str] = None,
     ) -> ImageRecord:
         """Insert processed image metadata and return the constructed dataclass."""
         created_at = datetime.utcnow().isoformat()
         async with self._connection() as conn:
             cursor = await conn.execute(
                 """
-                INSERT INTO images (user_id, filename, faces_json, ocr_text, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO images (
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    content_type,
+                    image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
+                    taken_at,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (user_id, filename, faces_json, ocr_text, created_at),
+                (
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    content_type,
+                    image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
+                    taken_at,
+                    created_at,
+                ),
             )
             await conn.commit()
             lastrowid = cursor.lastrowid
@@ -244,8 +319,106 @@ class Database:
             filename=filename,
             faces_json=faces_json,
             ocr_text=ocr_text,
+            ai_description=ai_description,
+            content_type=content_type,
+            image_data=image_data,
+            thumbnail_data=thumbnail_data,
+            thumbnail_content_type=thumbnail_content_type,
+            taken_at=taken_at,
             created_at=created_at,
         )
+
+    async def list_images_for_user(
+        self,
+        user_id: int,
+        *,
+        sort_by: str = "uploaded",
+        order: str = "desc",
+    ) -> list[ImageRecord]:
+        """Return all images owned by the given user with configurable sorting."""
+        sort_clause = "created_at"
+        if sort_by == "taken":
+            sort_clause = "COALESCE(taken_at, created_at)"
+        order_clause = "DESC" if order.lower() == "desc" else "ASC"
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT
+                    id,
+                    user_id,
+                    filename,
+                    faces_json,
+                    ocr_text,
+                    ai_description,
+                    content_type,
+                    image_data,
+                    thumbnail_data,
+                    thumbnail_content_type,
+                    taken_at,
+                    created_at
+                FROM images
+                WHERE user_id = ?
+                ORDER BY {sort_clause} {order_clause}, id DESC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [ImageRecord(**row) for row in rows]
+
+    async def fetch_image_for_user(
+        self, image_id: int, user_id: int
+    ) -> Optional[ImageRecord]:
+        row = await self.fetch_one(
+            """
+            SELECT
+                id,
+                user_id,
+                filename,
+                faces_json,
+                ocr_text,
+                ai_description,
+                content_type,
+                image_data,
+                thumbnail_data,
+                thumbnail_content_type,
+                taken_at,
+                created_at
+            FROM images
+            WHERE id = ? AND user_id = ?
+            """,
+            (image_id, user_id),
+        )
+        return ImageRecord(**row) if row else None
+
+    async def update_image_thumbnail(
+        self,
+        image_id: int,
+        user_id: int,
+        thumbnail_data: bytes,
+        thumbnail_content_type: str = "image/webp",
+    ) -> None:
+        async with self._connection() as conn:
+            await conn.execute(
+                """
+                UPDATE images
+                SET thumbnail_data = ?, thumbnail_content_type = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (thumbnail_data, thumbnail_content_type, image_id, user_id),
+            )
+            await conn.commit()
+
+    async def delete_image_for_user(self, image_id: int, user_id: int) -> bool:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                "DELETE FROM images WHERE id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            await conn.commit()
+            deleted = cursor.rowcount or 0
+            await cursor.close()
+        return deleted > 0
 
     async def fetch_session_by_token_hash(
         self, token_hash: str

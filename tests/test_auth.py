@@ -1,4 +1,9 @@
-from auth import generate_csrf_token, generate_session_token, verify_csrf_token, verify_session_token
+from auth import (
+    generate_csrf_token,
+    generate_session_token,
+    verify_csrf_token,
+    verify_session_token,
+)
 
 
 def test_session_token_hash_verification() -> None:

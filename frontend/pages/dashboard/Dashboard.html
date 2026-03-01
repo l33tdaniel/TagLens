@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Dashboard | Tag Lens</title>
+
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/tailwind.generated.css">
+
+  <!-- Dropzone -->
+  <link rel="stylesheet" href="/static/dropzone.min.css" />
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col font-[Inter]">
+
+  <header class="app-header px-10 py-6">
+
+  <!-- LEFT: Logo -->
+  <div class="brand-group flex items-center gap-4">
+    <div class="w-10 h-10 rounded-full 
+                border border-orange-200 
+                flex items-center justify-center font-semibold">
+      TL
+    </div>
+
+    <span class="text-lg font-medium tracking-tight">
+      Tag Lens
+    </span>
+  </div>
+
+  <!-- CENTER: Navigation -->
+  <nav class="app-nav flex items-center gap-4">
+
+    <a href="/"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Home
+    </a>
+
+    <a href="/dashboard"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Dashboard
+    </a>
+
+    <a href="/profile"
+      class="h-11 px-6 rounded-full
+             border border-orange-200
+             bg-white/50
+             flex items-center
+             text-sm font-medium
+             hover:bg-orange-50 transition">
+      Profile
+    </a>
+
+  </nav>
+
+  <!-- RIGHT: User Info -->
+  <div class="user-chip ml-auto flex items-center gap-4">
+
+    <span class="text-sm text-gray-600">
+      {{ user.email }}
+    </span>
+
+    <img src="/static/avatar.svg"
+         class="w-9 h-9 rounded-full border border-orange-200" />
+
+  </div>
+
+</header>
+
+  <!-- Main Dashboard -->
+  <main class="flex-grow flex justify-center px-6 pt-24 pb-20">
+
+  <div class="w-full max-w-4xl text-center">
+
+    <!-- Upload Section -->
+    <div class="flex justify-center">
+      <div class="w-full max-w-2xl">
+
+        <h2 class="text-3xl font-semibold mb-2">
+          Upload Photos
+        </h2>
+        <p class="text-gray-500 mb-8">
+          HEIC and PNG only
+        </p>
+
+        <form
+          id="photoDropzone"
+          class="dropzone border-2 border-dashed border-orange-300 
+                 rounded-2xl bg-creamsicle-soft p-12"
+          enctype="multipart/form-data">
+
+          <div class="dz-message text-gray-600">
+            Drag & drop files here
+            <div class="mt-6">
+              <span class="bg-creamsicle-primary text-white px-6 py-2 rounded-full">
+                Browse files
+              </span>
+            </div>
+          </div>
+
+        </form>
+
+        <button
+          id="uploadBtn"
+          class="mt-8 bg-creamsicle-primary text-white px-8 py-3 rounded-xl shadow hover:opacity-90 transition flex items-center justify-center gap-2 min-w-56">
+          <span id="uploadSpinner" class="upload-spinner hidden" aria-hidden="true"></span>
+          <span id="uploadBtnText">Upload Selected Files</span>
+        </button>
+
+      </div>
+    </div>
+
+  </div>
+
+</main>
+
+  <div id="noticeModal"
+       class="hidden fixed inset-0 flex items-center justify-center bg-black/50 px-6"
+       style="z-index: 70;"
+       onclick="closeNoticeModal(event)">
+    <div class="w-full max-w-sm rounded-2xl border border-orange-200 bg-white p-6 shadow-2xl" onclick="event.stopPropagation()">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 id="noticeTitle" class="text-lg font-semibold text-gray-900">Notice</h3>
+        <button onclick="closeNoticeModal()"
+                class="h-8 w-8 rounded-full border border-orange-200 text-gray-500 transition hover:bg-orange-50">
+          ✕
+        </button>
+      </div>
+      <p id="noticeMessage" class="mb-6 text-sm text-gray-600"></p>
+      <button onclick="closeNoticeModal()"
+              class="w-full rounded-full bg-creamsicle-primary py-2 text-sm font-medium text-white transition hover:opacity-90">
+        Close
+      </button>
+    </div>
+  </div>
+
+  <!-- Dropzone Script -->
+   <script src="/static/dropzone.min.js"></script>
+
+  <script>
+Dropzone.autoDiscover = false;
+
+const myDropzone = new Dropzone("#photoDropzone", {
+  url: "/api/photos",
+  autoProcessQueue: false,   // 🚨 important
+  uploadMultiple: false,     // keep false since backend expects 1 JSON per request
+  parallelUploads: 5,
+  maxFilesize: 20,
+  acceptedFiles: "image/*",
+});
+
+const uploadBtn = document.getElementById("uploadBtn");
+const uploadBtnText = document.getElementById("uploadBtnText");
+const uploadSpinner = document.getElementById("uploadSpinner");
+let isUploading = false;
+
+function showNotice({ title = "Notice", message = "Something happened." } = {}) {
+  document.getElementById("noticeTitle").textContent = title;
+  document.getElementById("noticeMessage").textContent = message;
+  document.getElementById("noticeModal").classList.remove("hidden");
+}
+
+function closeNoticeModal(event) {
+  if (event && event.target !== document.getElementById("noticeModal")) return;
+  document.getElementById("noticeModal").classList.add("hidden");
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeNoticeModal();
+});
+
+function setUploadState(uploading) {
+  isUploading = uploading;
+  uploadBtn.disabled = uploading;
+  uploadBtn.classList.toggle("opacity-60", uploading);
+  uploadBtn.classList.toggle("cursor-not-allowed", uploading);
+  uploadSpinner.classList.toggle("hidden", !uploading);
+  uploadBtnText.textContent = uploading ? "Uploading..." : "Upload Selected Files";
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const parts = result.split(",");
+      if (parts.length < 2) {
+        reject(new Error("Failed to parse file payload"));
+        return;
+      }
+      resolve(parts[1]);
+    };
+    reader.onerror = () => reject(reader.error || new Error("Failed reading file"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadSingleFile(file) {
+  const imageBase64 = await fileToBase64(file);
+  const payload = {
+    filename: file.name,
+    image_base64: imageBase64,
+    content_type: file.type || "application/octet-stream",
+  };
+  const response = await fetch("/api/photos", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    console.error("Photo upload failed", {
+      file: file.name,
+      status: response.status,
+      error: body.error || "unknown error",
+      responseBody: body,
+    });
+    throw new Error(body.error || `Upload failed (${response.status})`);
+  }
+  return body;
+}
+
+uploadBtn.addEventListener("click", async () => {
+  if (isUploading) return;
+  const files = myDropzone.getAcceptedFiles();
+  if (!files.length) {
+    showNotice({
+      title: "No Files Selected",
+      message: "Please choose at least one file to upload.",
+    });
+    return;
+  }
+  setUploadState(true);
+  try {
+    for (const file of files) {
+      await uploadSingleFile(file);
+    }
+    myDropzone.removeAllFiles(true);
+    showNotice({
+      title: "Upload Complete",
+      message: "Your selected files were uploaded successfully.",
+    });
+  } catch (error) {
+    console.error("Upload operation stopped due to error", error);
+    showNotice({
+      title: "Upload Failed",
+      message: error instanceof Error ? error.message : "Upload failed.",
+    });
+  } finally {
+    setUploadState(false);
+  }
+});
+</script>
+</body>
+</html>

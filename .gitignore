@@ -15,3 +15,6 @@ data/*.db
 data/*.sqlite3
 .logs/
 *.log
+test_images/
+.vscode/
+node_modules/

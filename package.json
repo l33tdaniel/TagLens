@@ -1,0 +1,21 @@
+{
+  "name": "taglens",
+  "version": "1.0.0",
+  "description": "This project is a small Robyn application that demonstrates a secure username/password flow.",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "build:css": "tailwindcss -i ./frontend/static/tailwind.input.css -o ./frontend/static/tailwind.generated.css --minify",
+    "build:css:watch": "tailwindcss -i ./frontend/static/tailwind.input.css -o ./frontend/static/tailwind.generated.css --watch",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}
