@@ -40,6 +40,10 @@ from auth import (
     verify_password,
 )
 from database import Database, SessionRecord, UserRecord
+from scripts.insightface_tagging import (
+    detect_and_tag_faces_for_user,
+    public_faces_payload,
+)
 import aiosqlite
 
 # Author: Daniel Neugent
@@ -746,6 +750,7 @@ async def profile_api(request: Request) -> Response:
                     "taken_at": record.taken_at,
                     "description": record.ai_description,
                     "ocr_text": record.ocr_text,
+                    "faces": public_faces_payload(record.faces_json),
                 }
                 for record in images
             ],
@@ -825,13 +830,25 @@ async def upload_photo_api(request: Request) -> Response:
         )
         return _json_response({"error": "upload failed unexpectedly"}, status=500)
 
+    faces_json = "[]"
+    try:
+        faces = await detect_and_tag_faces_for_user(auth.user.id, image_bytes, db)
+        faces_json = json.dumps(faces)
+    except Exception:
+        logger.warning(
+            "upload face detection/tagging skipped user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+            exc_info=True,
+        )
+
     try:
         # 2. Insert metadata first to get photo_id.
         # Keep blob data only when B2 is unavailable.
         image_blob = image_bytes if bucket is None else None
         saved = await db.create_image_metadata(
             filename=filename,
-            faces_json="[]",
+            faces_json=faces_json,
             ocr_text="",
             user_id=auth.user.id,
             ai_description=description,
@@ -881,6 +898,7 @@ async def upload_photo_api(request: Request) -> Response:
             "created_at": saved.created_at,
             "taken_at": saved.taken_at,
             "description": saved.ai_description,
+            "faces": public_faces_payload(saved.faces_json),
         },
         status=201,
     )
