@@ -5,11 +5,10 @@ import sys
 import numpy as np
 import cv2
 
-# import pytesseract
 from PIL import Image, ImageFile
 from PIL.ExifTags import GPSTAGS
 import pillow_heif
-from geopy.geocoders import Nominatim  # <--- New library
+from geopy.geocoders import Nominatim
 from transformers import AutoModelForCausalLM
 import torch
 from scripts.database_helper import init_db, save_photo_to_db, save_video_to_db
@@ -69,44 +68,6 @@ def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
     ]
 
 
-# def extract_ocr(img: Image.Image) -> Dict[str, Any]:
-#     """Extract OCR text and bounding boxes from image
-#     Returns dict with keys: text (str), boxes (List[Dict]), raw (dict), available (bool).
-#     """
-#     result: Dict[str, Any] = {"text": "", "boxes": [], "raw": {}, "available": True}
-#     try:
-#         data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT, config='--psm 11')
-#         test = pytesseract.image_to_string(img, config='--psm 11')
-#         result["raw"] = data
-#         print(result)
-#         print(test)
-#         lines: List[str] = []
-#         boxes: List[Dict[str, int]] = []
-#         n = len(data.get("text", []))
-#         for i in range(n):
-#             conf = int(data.get("conf", ["-1"])[i]) if data.get("conf") else -1
-#             txt = data.get("text", [""])[i]
-#             if txt and conf >= 60:  # filter low-confidence tokens
-#                 lines.append(txt)
-#                 boxes.append(
-#                     {
-#                         "x": int(data.get("left", [0])[i]),
-#                         "y": int(data.get("top", [0])[i]),
-#                         "w": int(data.get("width", [0])[i]),
-#                         "h": int(data.get("height", [0])[i]),
-#                         "conf": conf,
-#                     }
-#                 )
-#         result["text"] = " ".join(lines).strip()
-#         result["boxes"] = boxes
-#     except (pytesseract.TesseractNotFoundError, OSError) as e:
-#         # Tesseract binary not found on system; mark unavailable gracefully
-#         result["available"] = False
-#         result["text"] = ""
-#         result["boxes"] = []
-#         result["raw"] = {"error": str(e)}
-#         print(e)
-#     return result
 
 
 def ocr2(img):
@@ -155,7 +116,7 @@ def get_complete_metadata(path, conn, user_id):
     exposure = exif_ifd.get(33434, None)
     shutter = (
         f"1/{int(1/exposure)}"
-        if (isinstance(exposure, (int, float)) and exposure < 1)
+        if (isinstance(exposure, (int, float)) and exposure > 0 and exposure < 1)
         else f"{exposure}"
     )
 
@@ -164,7 +125,6 @@ def get_complete_metadata(path, conn, user_id):
     lat = None
     lon = None
 
-    # print(gps_info)
     if gps_info and len(gps_info) > 1:
         raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
 
@@ -190,12 +150,6 @@ def get_complete_metadata(path, conn, user_id):
             lat = None
             lon = None
 
-    # # Face recognition (commented out for now)
-    # start = time.perf_counter()
-    # faces = detect_faces(img)
-    # end = time.perf_counter()
-    # face_time = end - start
-
     # Captioning
     output_caption = None
     if model:
@@ -210,39 +164,6 @@ def get_complete_metadata(path, conn, user_id):
 
     # OCR
     ocr = ocr2(img)
-
-    # --- FINAL OUTPUT ---
-    # print(f"\n{'='*40}")
-    # print(f"FILE:        {os.path.basename(path)}")
-    # print(f"SIZE:        {file_size_mb:.2f} MB")
-    # print(f"QUALITY:     {w}x{h} ({mp:.2f}MP)")
-    # print(f"DEVICE:      {phone_make} {phone_model}")
-    # print(f"DATE:        {date}")
-    # print(f"SETTINGS:    ƒ/{f_stop} | {shutter}s | {focal}mm | ISO {iso}")
-    # print(f"COORDS:      {lat_lon_str}")
-    # print(f"LOCATION:    {location_data}")
-    # if output_caption is not None:
-    #     print(f"CAPTION:     {output_caption}")
-    # Faces summary
-    # print(f"FACES:       {len(faces)} detected")
-    # if faces:
-    #     print("FACE BOXES:  " + ", ".join([f"(x={f['x']}, y={f['y']}, w={f['w']}, h={f['h']})" for f in faces]))
-
-    # OCR summary
-    # ocr_status = "available" if ocr.get("available", True) else "not available"
-    # print(f"OCR:         {ocr_status}; {len(ocr.get('boxes', []))} tokens")
-    # print(ocr)
-    # if ocr.get("text"):
-    #     preview = (ocr["text"][:180] + "...") if len(ocr["text"]) > 180 else ocr["text"]
-    # print(f"OCR TEXT:    {ocr}")
-    # print(f"{'='*40}\n")
-
-    # print(f"Time to open: {open_time}")
-    # print(f"Time to get not gps data: {non_gps_time}")
-    # print(f"Time to get full data: {gps_time}")
-    # # print(f"Time to detect faces: {face_time}")
-    # print(f"Time to extract OCR: {ocr_time}")
-    # print(f"Time to get caption: {caption_time}")
 
     metadata = dict()
     metadata["filename"] = os.path.basename(path)
@@ -259,7 +180,6 @@ def get_complete_metadata(path, conn, user_id):
     metadata["focal"] = float(focal) if focal else None
     metadata["lat"] = lat
     metadata["lon"] = lon
-    # CHANGE THIS LATER
     metadata["loc_description"] = None
     metadata["loc_city"] = None
     metadata["loc_state"] = None
@@ -272,23 +192,11 @@ def get_complete_metadata(path, conn, user_id):
             metadata["loc_state"] = loc[-2]
             metadata["loc_country"] = loc[-1]
 
-    metadata["caption"] = output_caption["caption"]
+    metadata["caption"] = output_caption.get("caption", "") if isinstance(output_caption, dict) else (output_caption or "")
     metadata["ocr"] = ocr
 
     metadata["user_id"] = user_id
 
-    # # results to the SQLite db
-    # try:
-    #     db = Database()
-    #     asyncio.run(db.initialize())
-    #     faces_json = json.dumps(faces)
-    #     filename = os.path.basename(path)
-    #     saved = asyncio.run(db.create_image_metadata(filename, faces_json, ocr.get("text", "")))
-    #     print(f"Saved image metadata to DB: id={saved.id} file={saved.filename}")
-    # except Exception as e:
-    #     print(f"Warning: failed to save image metadata: {e}")
-
-    # print(metadata)
     save_photo_to_db(conn, metadata)
 
 
@@ -307,33 +215,17 @@ def handle_video(path, conn, user_id):
         "user_id": user_id,
     }
 
-    # --- FINAL OUTPUT ---
-    # print(f"\n{'='*40}")
-    # print(f"FILE:        {filename}")
-    # print(f"SIZE:        {file_size_mb:.2f} MB")
-    # print(f"TYPE:        Video (Minimal Metadata)")
-    # print(f"{'='*40}\n")
-    # print(f"Time to process video: {process_time:.5f}s")
-
-    # 3. Hand off to the SQLite DB
+    # Hand off to the SQLite DB
     save_video_to_db(conn, metadata)
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else r"test_images\IMG_8700.heif"
+    if len(sys.argv) < 2:
+        print("Usage: python metadata.py <image_path>")
+        sys.exit(1)
+    target = sys.argv[1]
     curr = init_db()
     if not os.path.exists(target):
         print(f"Input image not found: {target}")
     else:
-        get_complete_metadata(
-            r"D:\Photos\takeout-20260212T234250Z-3-001\Takeout\Google Photos\Photos from 2020\IMG_3301.JPG",
-            curr,
-            1,
-        )
-        get_complete_metadata(
-            r"D:\Photos\takeout-20260212T234250Z-3-001\Takeout\Google Photos\Photos from 2021\IMG_1598.WEBP",
-            curr,
-            1,
-        )
         get_complete_metadata(target, curr, 1)
-        # download_from_b2("1/1.heif", "test_images\\pain.heif")

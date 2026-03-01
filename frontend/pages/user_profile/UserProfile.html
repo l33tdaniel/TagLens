@@ -174,6 +174,11 @@
   </div>
 
   <script>
+    function getCsrfToken() {
+      const match = document.cookie.match(/(?:^|;\s*)taglens_csrf=([^;]*)/);
+      return match ? decodeURIComponent(match[1]) : "";
+    }
+
     let currentPhotoId = null;
 
     // ── Gallery ──────────────────────────────────────────────
@@ -181,11 +186,18 @@
       const sortBy = document.getElementById("sortBy").value;
       const sortOrder = document.getElementById("sortOrder").value;
 
-      const res = await fetch(`/api/profile?sort_by=${sortBy}&order=${sortOrder}`);
-      const data = await res.json();
+      let data;
+      try {
+        const res = await fetch(`/api/profile?sort_by=${sortBy}&order=${sortOrder}`);
+        if (!res.ok) throw new Error(`Server error (${res.status})`);
+        data = await res.json();
+      } catch (e) {
+        showNotice({ title: "Load Failed", message: "Could not load gallery. Please refresh." });
+        return;
+      }
 
       const grid = document.getElementById("galleryGrid");
-      grid.innerHTML = "";
+      while (grid.firstChild) grid.removeChild(grid.firstChild);
       document.getElementById("photosCount").textContent = data.photos.length;
 
       for (const photo of data.photos) {
@@ -199,36 +211,28 @@
         card.dataset.caption = caption;
         card.dataset.src = fullSrc;
 
-        card.innerHTML = `
-          <img src="${thumbSrc}"
-               loading="lazy"
-               decoding="async"
-               onerror="this.onerror=null; this.src='${fullSrc}'"
-               class="w-full h-64 object-cover rounded-xl transition group-hover:scale-105 duration-300" />
+        const img = document.createElement("img");
+        img.src = thumbSrc;
+        img.loading = "lazy";
+        img.decoding = "async";
+        img.className = "w-full h-64 object-cover rounded-xl transition group-hover:scale-105 duration-300";
+        img.onerror = function() { this.onerror = null; this.src = fullSrc; };
+        card.appendChild(img);
 
-          <!-- Hover overlay -->
-          <div class="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition duration-300 rounded-xl"></div>
+        const overlay = document.createElement("div");
+        overlay.className = "absolute inset-0 bg-black/0 group-hover:bg-black/20 transition duration-300 rounded-xl";
+        card.appendChild(overlay);
 
-          <!-- Caption -->
-          <div class="absolute bottom-0 left-0 right-0 
-                      bg-gradient-to-t from-black/60 to-transparent
-                      text-white text-xs p-3
-                      opacity-0 group-hover:opacity-100 transition duration-300 rounded-b-xl">
-            ${caption}
-          </div>
+        const captionEl = document.createElement("div");
+        captionEl.className = "absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/60 to-transparent text-white text-xs p-3 opacity-0 group-hover:opacity-100 transition duration-300 rounded-b-xl";
+        captionEl.textContent = caption;
+        card.appendChild(captionEl);
 
-          <!-- Delete button (top-right on hover) -->
-          <button class="delete-btn absolute top-2 right-2
-                         w-8 h-8 rounded-full
-                         bg-black/40 border border-white/20
-                         text-white text-sm
-                         opacity-0 group-hover:opacity-100 transition duration-300
-                         hover:bg-red-500/80 flex items-center justify-center"
-                  data-photo-id="${photo.id}"
-                  onclick="event.stopPropagation(); promptDelete(${photo.id})">
-            🗑
-          </button>
-        `;
+        const deleteBtn = document.createElement("button");
+        deleteBtn.className = "delete-btn absolute top-2 right-2 w-8 h-8 rounded-full bg-black/40 border border-white/20 text-white text-sm opacity-0 group-hover:opacity-100 transition duration-300 hover:bg-red-500/80 flex items-center justify-center";
+        deleteBtn.textContent = "🗑";
+        deleteBtn.addEventListener("click", (e) => { e.stopPropagation(); promptDelete(photo.id); });
+        card.appendChild(deleteBtn);
 
         card.addEventListener("click", () => openLightbox(photo.id, fullSrc, caption));
         grid.appendChild(card);
@@ -304,7 +308,7 @@
       try {
         const res = await fetch("/api/photos", {
           method: "DELETE",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
           body: JSON.stringify({ photo_id: photoId, confirm_delete: true }),
         });
 
