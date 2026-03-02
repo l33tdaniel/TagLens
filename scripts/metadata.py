@@ -21,11 +21,14 @@ pillow_heif.register_heif_opener()
 geolocator = Nominatim(user_agent="TagLens", domain="localhost:8080", scheme="http")
 if torch and torch.cuda.is_available():
     device = "cuda"
+    reader = easyocr.Reader(["en"], gpu=True)
 elif (
     torch and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
 ):
     device = "mps"
+    reader = easyocr.Reader(["en"], gpu=True)
 else:
+    reader = easyocr.Reader(["en"], gpu=False)
     device = "cpu"
 
 print(f"Using device: {device}")
@@ -47,7 +50,6 @@ if AutoModelForCausalLM and torch:
     except Exception as e:
         print(f"Captioning model unavailable; skipping captions: {e}")
 
-reader = easyocr.Reader(["en"], gpu=True)
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
