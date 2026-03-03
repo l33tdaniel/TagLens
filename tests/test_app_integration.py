@@ -260,6 +260,138 @@ def test_photo_upload_persists_generated_description_field(server: ServerInfo) -
     assert "test.png" in payload.body
 
 
+def test_photo_upload_rejects_missing_csrf_header(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    image_base64 = base64.b64encode(b"fake image bytes").decode("utf-8")
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "no-csrf.png",
+            "image_base64": image_base64,
+        },
+    )
+    assert upload.status == 403
+
+
+def test_photo_delete_rejects_missing_csrf_header(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    image_base64 = base64.b64encode(b"delete-csrf-check").decode("utf-8")
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "delete-csrf-check.png",
+            "image_base64": image_base64,
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 201
+    photo_id = json.loads(upload.body)["id"]
+    deleted = client.request(
+        "DELETE",
+        "/api/photos",
+        json_data={"photo_id": photo_id, "confirm_delete": True},
+    )
+    assert deleted.status == 403
+
+
+def test_photo_upload_rejects_oversized_payload(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    oversized = b"x" * ((20 * 1024 * 1024) + 1)
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "too-big.png",
+            "image_base64": base64.b64encode(oversized).decode("utf-8"),
+            "content_type": "image/png",
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 413
+
+
+def test_upload_sanitizes_filename_and_normalizes_content_type(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    raw = b"sanitize"
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "../../evil?.png",
+            "image_base64": base64.b64encode(raw).decode("utf-8"),
+            "content_type": "text/plain",
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 201
+    saved = json.loads(upload.body)
+    assert saved["filename"] == "evil_.png"
+
+    download = client.request(
+        "GET",
+        f"/api/photos/download?photo_id={saved['id']}",
+    )
+    assert download.status == 200
+    payload = json.loads(download.body)
+    assert payload["content_type"] == "image/png"
+
+
+def test_upload_defaults_unknown_content_type_to_octet_stream(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    raw = b"unknown-content-type"
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "blob.customext",
+            "image_base64": base64.b64encode(raw).decode("utf-8"),
+            "content_type": "text/plain",
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 201
+    saved = json.loads(upload.body)
+    download = client.request(
+        "GET",
+        f"/api/photos/download?photo_id={saved['id']}",
+    )
+    assert download.status == 200
+    payload = json.loads(download.body)
+    assert payload["content_type"] == "application/octet-stream"
+
+
 def test_profile_photo_sort_by_taken_date(server: ServerInfo) -> None:
     client = TestClient(server.base_url)
     unique = uuid4().hex[:8]
@@ -383,6 +515,30 @@ def test_photo_download_returns_uploaded_binary(server: ServerInfo) -> None:
     assert base64.b64decode(payload["image_base64"]) == raw
 
 
+def test_photo_download_rejects_invalid_photo_id(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    response = client.request("GET", "/api/photos/download?photo_id=abc")
+    assert response.status == 400
+
+
+def test_photo_download_returns_not_found_for_missing_photo(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    response = client.request("GET", "/api/photos/download?photo_id=999999")
+    assert response.status == 404
+
+
 def test_photo_view_requires_authentication(server: ServerInfo) -> None:
     client = TestClient(server.base_url)
     response = client.request("GET", "/api/photos/view?photo_id=1")
@@ -406,6 +562,76 @@ def test_photo_thumb_rejects_non_integer_photo_id(server: ServerInfo) -> None:
 
     response = client.request("GET", "/api/photos/thumb?photo_id=abc")
     assert response.status == 400
+
+
+def test_photo_view_rejects_non_integer_photo_id(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+    response = client.request("GET", "/api/photos/view?photo_id=abc")
+    assert response.status == 400
+
+
+def test_upload_uses_extracted_taken_at_when_missing_from_payload(server: ServerInfo) -> None:
+    from PIL import Image
+    import io
+
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    image = Image.new("RGB", (16, 16), (255, 255, 255))
+    exif = Image.Exif()
+    exif[36867] = "2025:02:03 04:05:06"
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", exif=exif)
+    payload = buffer.getvalue()
+
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "exif.jpg",
+            "image_base64": base64.b64encode(payload).decode("utf-8"),
+            "content_type": "image/jpeg",
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 201
+    saved = json.loads(upload.body)
+    assert saved["taken_at"] == "2025-02-03T04:05:06"
+
+    profile = client.request("GET", "/api/profile")
+    assert profile.status == 200
+    rows = json.loads(profile.body)["photos"]
+    item = next(photo for photo in rows if photo["id"] == saved["id"])
+    assert isinstance(item.get("ocr_text", ""), str)
+
+
+def test_login_rate_limit_in_production_env(server_prod: ServerInfo) -> None:
+    client = TestClient(server_prod.base_url)
+    status_codes = []
+    for _ in range(11):
+        response = client.request("POST", "/login", data={})
+        status_codes.append(response.status)
+    assert status_codes[-1] == 429
+
+
+def test_register_rate_limit_in_production_env(server_prod: ServerInfo) -> None:
+    client = TestClient(server_prod.base_url)
+    status_codes = []
+    for _ in range(6):
+        response = client.request("POST", "/register", data={})
+        status_codes.append(response.status)
+    assert status_codes[-1] == 429
 
 
 def test_photo_view_returns_image_when_authenticated(server: ServerInfo) -> None:

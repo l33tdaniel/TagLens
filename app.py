@@ -48,6 +48,7 @@ from scripts.insightface_tagging import (
     detect_and_tag_faces_for_user,
     public_faces_payload,
 )
+from scripts.upload_metadata import extract_upload_metadata
 import aiosqlite
 
 # Author: Daniel Neugent
@@ -880,6 +881,19 @@ async def upload_photo_api(request: Request) -> Response:
         len(image_bytes),
         content_type,
     )
+    ocr_text = ""
+    try:
+        extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
+        if taken_at is None:
+            taken_at = extracted.taken_at
+        ocr_text = extracted.ocr_text
+    except Exception:
+        logger.warning(
+            "upload metadata extraction skipped user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+            exc_info=True,
+        )
     thumbnail_data: Optional[bytes] = None
     try:
         thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
@@ -924,7 +938,7 @@ async def upload_photo_api(request: Request) -> Response:
         saved = await db.create_image_metadata(
             filename=filename,
             faces_json=faces_json,
-            ocr_text="",
+            ocr_text=ocr_text,
             user_id=auth.user.id,
             ai_description=description,
             content_type=content_type,

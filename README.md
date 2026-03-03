@@ -31,10 +31,7 @@ This repository contains a Robyn-based web app for user authentication, profile 
    python -m pip install --upgrade pip
    python -m pip install -r requirements.txt -r requirements-dev.txt
    ```
-3. Install media/metadata extras (currently required for app startup because `app.py` imports `scripts/metadata.py` at import time):
-   ```bash
-   python -m pip install -r arnav_requirements.txt
-   ```
+3. (Optional) `arnav_requirements.txt` is now a legacy alias that points to `requirements.txt` for backward compatibility.
 4. Set environment variables for Backblaze B2 (required by current startup path):
    ```bash
    export KEY_ID="..."
@@ -76,11 +73,12 @@ This repository contains a Robyn-based web app for user authentication, profile 
 - You can toggle secure cookies by setting `ROBYN_SECURE_COOKIES=1` in the environment (remember to run behind HTTPS when secure cookies are enabled).
 
 ## Image Processing (Faces + OCR)
-- A standalone script at `scripts/metadata.py` extracts EXIF, captions, face boxes, and OCR text from images (including HEIC).
-- Install extra dependencies for this script using `arnav_requirements.txt`.
+- Uploads now extract OCR text and EXIF `taken_at` metadata directly in the API path.
+- Uploads also run face detection/tagging with persisted per-user face embeddings for faster matching.
+- `scripts/metadata.py` remains available as a standalone metadata utility.
 
 ### OCR setup
-- OCR uses EasyOCR, which is automatically installed via `arnav_requirements.txt`.
+- OCR uses EasyOCR, installed by `requirements.txt`.
 - No additional system dependencies required.
 
 ## Image storage

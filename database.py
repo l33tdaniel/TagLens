@@ -62,6 +62,15 @@ class ImageRecord:
     created_at: str
 
 
+@dataclass
+class FaceEmbeddingRecord:
+    user_id: int
+    tag: str
+    embedding_json: str
+    samples_count: int
+    updated_at: str
+
+
 class Database:
     """Lightweight wrapper around aiosqlite for user persistence."""
 
@@ -120,6 +129,19 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
                 """)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS face_embeddings (
+                    user_id INTEGER NOT NULL,
+                    tag TEXT NOT NULL,
+                    embedding_json TEXT NOT NULL,
+                    samples_count INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, tag),
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
             try:
                 await conn.execute(
                     "ALTER TABLE images ADD COLUMN ai_description TEXT NOT NULL DEFAULT ''"
@@ -152,6 +174,12 @@ class Database:
             try:
                 await conn.execute(
                     "ALTER TABLE images ADD COLUMN taken_at TEXT"
+                )
+            except aiosqlite.OperationalError:
+                pass
+            try:
+                await conn.execute(
+                    "ALTER TABLE face_embeddings ADD COLUMN samples_count INTEGER NOT NULL DEFAULT 1"
                 )
             except aiosqlite.OperationalError:
                 pass
@@ -419,6 +447,55 @@ class Database:
             deleted = cursor.rowcount or 0
             await cursor.close()
         return deleted > 0
+
+    async def list_face_embeddings_for_user(self, user_id: int) -> list[FaceEmbeddingRecord]:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                """
+                SELECT user_id, tag, embedding_json, samples_count, updated_at
+                FROM face_embeddings
+                WHERE user_id = ?
+                ORDER BY tag ASC
+                """,
+                (user_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [FaceEmbeddingRecord(**row) for row in rows]
+
+    async def upsert_face_embedding_for_user(
+        self, user_id: int, tag: str, embedding_json: str
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            row_cursor = await conn.execute(
+                """
+                SELECT embedding_json, samples_count
+                FROM face_embeddings
+                WHERE user_id = ? AND tag = ?
+                """,
+                (user_id, tag),
+            )
+            existing = await row_cursor.fetchone()
+            await row_cursor.close()
+            if existing is None:
+                await conn.execute(
+                    """
+                    INSERT INTO face_embeddings (user_id, tag, embedding_json, samples_count, updated_at)
+                    VALUES (?, ?, ?, 1, ?)
+                    """,
+                    (user_id, tag, embedding_json, now),
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE face_embeddings
+                    SET embedding_json = ?, samples_count = samples_count + 1, updated_at = ?
+                    WHERE user_id = ? AND tag = ?
+                    """,
+                    (embedding_json, now, user_id, tag),
+                )
+            await conn.commit()
 
     async def fetch_session_by_token_hash(
         self, token_hash: str

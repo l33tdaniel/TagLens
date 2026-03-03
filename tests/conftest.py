@@ -150,3 +150,42 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> ServerInfo:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - safety net
             proc.kill()
+
+
+@pytest.fixture(scope="function")
+def server_prod(tmp_path: Path) -> ServerInfo:
+    if shutil.which("robyn") is None:
+        pytest.skip("Robyn CLI is not available in this environment.")
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "users.db"
+    try:
+        port = _find_free_port()
+    except RuntimeError as exc:
+        pytest.skip(str(exc))
+    env = os.environ.copy()
+    env.update(
+        {
+            "ROBYN_HOST": "127.0.0.1",
+            "ROBYN_PORT": str(port),
+            "ROBYN_SECURE_COOKIES": "0",
+            "TAGLENS_DB_PATH": str(db_path),
+            "ROBYN_ENV": "production",
+        }
+    )
+    proc = subprocess.Popen(
+        ["robyn", "app.py", "--log-level", "ERROR"],
+        cwd=repo_root,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        _wait_for_server(f"http://127.0.0.1:{port}", proc)
+        yield ServerInfo(base_url=f"http://127.0.0.1:{port}", db_path=db_path)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - safety net
+            proc.kill()

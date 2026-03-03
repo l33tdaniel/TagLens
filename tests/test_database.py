@@ -93,3 +93,26 @@ async def test_list_images_can_sort_by_taken_date(tmp_path) -> None:
     )
     rows = await db.list_images_for_user(user.id, sort_by="taken", order="asc")
     assert [row.filename for row in rows] == ["b.jpg", "a.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_face_embedding_index_upsert_and_list(tmp_path) -> None:
+    db = Database(tmp_path / "test.db")
+    await db.initialize()
+    user = await db.create_user("dave", "dave@example.com", "hashed")
+
+    await db.upsert_face_embedding_for_user(
+        user.id, "person_1", "[0.1,0.2,0.3]"
+    )
+    await db.upsert_face_embedding_for_user(
+        user.id, "person_1", "[0.2,0.3,0.4]"
+    )
+    await db.upsert_face_embedding_for_user(
+        user.id, "person_2", "[1.0,0.0,0.0]"
+    )
+
+    rows = await db.list_face_embeddings_for_user(user.id)
+    assert len(rows) == 2
+    person_1 = next(row for row in rows if row.tag == "person_1")
+    assert person_1.samples_count == 2
+    assert person_1.embedding_json == "[0.2,0.3,0.4]"
