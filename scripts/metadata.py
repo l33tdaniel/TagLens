@@ -4,7 +4,6 @@ import sys
 
 import numpy as np
 import cv2
-
 from PIL import Image, ImageFile
 from PIL.ExifTags import GPSTAGS
 import pillow_heif
@@ -28,12 +27,6 @@ else:
     device = "cpu"
 
 print(f"Using device: {device}")
-
-# if os.name == "nt":
-#     _tess_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-#     if os.path.exists(_tess_default):
-#         pytesseract.pytesseract.tesseract_cmd = _tess_default
-
 model = None
 if AutoModelForCausalLM and torch:
     try:
@@ -92,7 +85,6 @@ def ocr2(img):
 # Helper func
 def to_deci(val):
     return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
-
 
 def get_complete_metadata(path, conn, user_id):
     # Open the image and time how long that takes

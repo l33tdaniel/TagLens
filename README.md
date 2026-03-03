@@ -79,6 +79,10 @@ This repository contains a Robyn-based web app for user authentication, profile 
 - A standalone script at `scripts/metadata.py` extracts EXIF, captions, face boxes, and OCR text from images (including HEIC).
 - Install extra dependencies for this script using `arnav_requirements.txt`.
 
+### OCR setup
+- OCR uses EasyOCR, which is automatically installed via `arnav_requirements.txt`.
+- No additional system dependencies required.
+
 ## Image storage
 The program uses Backblaze to store image files. You can configure the app via `.env` (auto-loaded by `./start_server.sh`), for example:
 
@@ -96,6 +100,7 @@ BUCKET_NAME=your_bucket_name
 ```bash
 ./scripts/check.sh
 ```
+The script prints face bounding boxes and extracted text from the image.
 
 Or run each check directly:
 ```bash
