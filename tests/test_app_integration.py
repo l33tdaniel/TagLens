@@ -17,6 +17,12 @@ def _extract_csrf_token(html: str) -> str:
     return match.group(1)
 
 
+def _csrf_headers(client: TestClient) -> dict[str, str]:
+    """Build headers dict with X-CSRF-Token from the client's cookie jar."""
+    token = client.get_cookie("taglens_csrf")
+    return {"X-CSRF-Token": token} if token else {}
+
+
 def _register_user(
     client: TestClient, username: str, email: str, password: str
 ) -> None:
@@ -245,6 +251,7 @@ def test_photo_upload_persists_generated_description_field(server: ServerInfo) -
             "filename": "test.png",
             "image_base64": image_base64,
         },
+        headers=_csrf_headers(client),
     )
     assert upload.status == 201
 
@@ -273,6 +280,7 @@ def test_profile_photo_sort_by_taken_date(server: ServerInfo) -> None:
             "taken_at": "2025-01-10T10:00:00Z",
             "content_type": "image/jpeg",
         },
+        headers=_csrf_headers(client),
     )
     assert created.status == 201
     created = client.request(
@@ -284,6 +292,7 @@ def test_profile_photo_sort_by_taken_date(server: ServerInfo) -> None:
             "taken_at": "2024-01-10T10:00:00Z",
             "content_type": "image/jpeg",
         },
+        headers=_csrf_headers(client),
     )
     assert created.status == 201
 
@@ -312,6 +321,7 @@ def test_photo_delete_requires_confirmation_and_deletes(server: ServerInfo) -> N
             "image_base64": image_base64,
             "content_type": "image/png",
         },
+        headers=_csrf_headers(client),
     )
     assert upload.status == 201
     uploaded = json.loads(upload.body)
@@ -321,6 +331,7 @@ def test_photo_delete_requires_confirmation_and_deletes(server: ServerInfo) -> N
         "DELETE",
         "/api/photos",
         json_data={"photo_id": photo_id, "confirm_delete": False},
+        headers=_csrf_headers(client),
     )
     assert rejected.status == 400
 
@@ -328,6 +339,7 @@ def test_photo_delete_requires_confirmation_and_deletes(server: ServerInfo) -> N
         "DELETE",
         "/api/photos",
         json_data={"photo_id": photo_id, "confirm_delete": True},
+        headers=_csrf_headers(client),
     )
     assert deleted.status == 200
 
@@ -355,6 +367,7 @@ def test_photo_download_returns_uploaded_binary(server: ServerInfo) -> None:
             "image_base64": base64.b64encode(raw).decode("utf-8"),
             "content_type": "image/webp",
         },
+        headers=_csrf_headers(client),
     )
     assert upload.status == 201
     saved = json.loads(upload.body)
@@ -413,6 +426,7 @@ def test_photo_view_returns_image_when_authenticated(server: ServerInfo) -> None
             "image_base64": base64.b64encode(raw).decode("utf-8"),
             "content_type": "image/webp",
         },
+        headers=_csrf_headers(client),
     )
     assert upload.status == 201
     saved = json.loads(upload.body)
@@ -439,6 +453,7 @@ def test_photo_thumb_returns_image_when_authenticated(server: ServerInfo) -> Non
             "image_base64": base64.b64encode(raw).decode("utf-8"),
             "content_type": "image/webp",
         },
+        headers=_csrf_headers(client),
     )
     assert upload.status == 201
     saved = json.loads(upload.body)
@@ -447,12 +462,11 @@ def test_photo_thumb_returns_image_when_authenticated(server: ServerInfo) -> Non
     assert thumb.status == 200
 
 
-def test_debug_b2_route_available(server: ServerInfo) -> None:
+def test_debug_b2_route_removed(server: ServerInfo) -> None:
+    """The /debug/b2 endpoint was removed for security (unauthenticated bucket enumeration)."""
     client = TestClient(server.base_url)
     response = client.request("GET", "/debug/b2")
-    assert response.status == 200
-    payload = json.loads(response.body)
-    assert "files" in payload
+    assert response.status == 404
 
 
 def test_docs_and_openapi_routes_available(server: ServerInfo) -> None:
