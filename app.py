@@ -239,6 +239,17 @@ def _verify_api_csrf(request: Request) -> bool:
     return verify_csrf_token(csrf_cookie, csrf_header)
 
 
+def _is_test_env() -> bool:
+    return os.getenv("ROBYN_ENV", "").strip().lower() == "test"
+
+
+def _allow_rate_limited_request(limiter: RateLimiter, request: Request) -> bool:
+    # Integration tests run many requests from one local IP in a tight loop.
+    if _is_test_env():
+        return True
+    return limiter.is_allowed(_client_ip(request))
+
+
 def _cookie_header(name: str, value: str, settings: dict) -> str:
     parts = [f"{name}={value}"]
     max_age = settings.get("max_age")
@@ -811,7 +822,7 @@ async def upload_photo_api(request: Request) -> Response:
         return _json_response({"error": "authentication required"}, status=401)
     if not _verify_api_csrf(request):
         return _json_response({"error": "CSRF validation failed"}, status=403)
-    if not _upload_limiter.is_allowed(_client_ip(request)):
+    if not _allow_rate_limited_request(_upload_limiter, request):
         return _json_response({"error": "too many uploads, try again later"}, status=429)
     payload = _json_data(request)
     raw_filename = str(payload.get("filename", "")).strip()
@@ -1169,7 +1180,7 @@ async def login_get(request: Request) -> Response:
 @app.post("/login")
 async def login_post(request: Request) -> Response:
     """Validate credentials and issue a session token when authentication succeeds."""
-    if not _login_limiter.is_allowed(_client_ip(request)):
+    if not _allow_rate_limited_request(_login_limiter, request):
         return _html_response("<p>Too many login attempts. Please try again later.</p>", status=429)
     form = _form_data(request)
     email = (form.get("email") or "").strip().lower()
@@ -1272,7 +1283,7 @@ async def register_get(request: Request) -> Response:
 @app.post("/register")
 async def register_post(request: Request) -> Response:
     """Process registration data, enforce validation, and persist new users."""
-    if not _register_limiter.is_allowed(_client_ip(request)):
+    if not _allow_rate_limited_request(_register_limiter, request):
         return _html_response("<p>Too many registration attempts. Please try again later.</p>", status=429)
     form = _form_data(request)
     username = (form.get("username") or "").strip()
