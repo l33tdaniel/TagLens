@@ -118,8 +118,7 @@ def _get_easyocr_reader():
     if _torch_available():
         try:
             import torch
-
-            gpu = torch.cuda.is_available()
+            gpu = torch.cuda.is_available() or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
         except Exception:
             gpu = False
     with _reader_lock:
