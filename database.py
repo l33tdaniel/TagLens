@@ -62,19 +62,54 @@ class ImageRecord:
     created_at: str
 
 
+@dataclass
+class ImageMetadataRecord:
+    id: int
+    image_id: int
+    user_id: int
+    faces_json: str
+    ocr_text: str
+    caption: str
+    lat: Optional[float]
+    lon: Optional[float]
+    loc_description: Optional[str]
+    loc_city: Optional[str]
+    loc_state: Optional[str]
+    loc_country: Optional[str]
+    make: Optional[str]
+    model: Optional[str]
+    iso: Optional[int]
+    f_stop: Optional[float]
+    shutter_speed: Optional[str]
+    focal_length: Optional[float]
+    width: Optional[int]
+    height: Optional[int]
+    file_size_mb: Optional[float]
+    taken_at: Optional[str]
+    created_at: str
+    updated_at: str
+
+
 class Database:
     """Lightweight wrapper around aiosqlite for user persistence."""
 
     def __init__(self, db_path: Path = DB_PATH) -> None:
         self.db_path = db_path
+        self._conn: Optional[aiosqlite.Connection] = None
+
+    async def _get_conn(self) -> aiosqlite.Connection:
+        """Return the persistent connection, creating it on first use."""
+        if self._conn is None:
+            self._conn = await aiosqlite.connect(self.db_path)
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA foreign_keys = ON;")
+            await self._conn.execute("PRAGMA journal_mode = WAL;")
+        return self._conn
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
-        """Open a connection with foreign-key support enabled."""
-        async with aiosqlite.connect(self.db_path) as conn:
-            conn.row_factory = aiosqlite.Row
-            await conn.execute("PRAGMA foreign_keys = ON;")
-            yield conn
+        """Return the persistent connection as a context manager."""
+        yield await self._get_conn()
 
     async def initialize(self) -> None:
         """Create directories and ensure the users table exists."""
@@ -118,6 +153,35 @@ class Database:
                     taken_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                )
+                """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS image_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL,
+                    faces_json TEXT NOT NULL DEFAULT '[]',
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    lat REAL,
+                    lon REAL,
+                    loc_description TEXT,
+                    loc_city TEXT,
+                    loc_state TEXT,
+                    loc_country TEXT,
+                    make TEXT,
+                    model TEXT,
+                    iso INTEGER,
+                    f_stop REAL,
+                    shutter_speed TEXT,
+                    focal_length REAL,
+                    width INTEGER,
+                    height INTEGER,
+                    file_size_mb REAL,
+                    taken_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
                 )
                 """)
             try:
@@ -351,8 +415,8 @@ class Database:
                     ocr_text,
                     ai_description,
                     content_type,
-                    image_data,
-                    thumbnail_data,
+                    NULL AS image_data,
+                    NULL AS thumbnail_data,
                     thumbnail_content_type,
                     taken_at,
                     created_at
@@ -409,6 +473,18 @@ class Database:
             )
             await conn.commit()
 
+    async def clear_image_thumbnail(self, image_id: int, user_id: int) -> None:
+        async with self._connection() as conn:
+            await conn.execute(
+                """
+                UPDATE images
+                SET thumbnail_data = NULL, thumbnail_content_type = NULL
+                WHERE id = ? AND user_id = ?
+                """,
+                (image_id, user_id),
+            )
+            await conn.commit()
+
     async def delete_image_for_user(self, image_id: int, user_id: int) -> bool:
         async with self._connection() as conn:
             cursor = await conn.execute(
@@ -419,6 +495,148 @@ class Database:
             deleted = cursor.rowcount or 0
             await cursor.close()
         return deleted > 0
+
+    async def fetch_image_metadata_for_user(
+        self, image_id: int, user_id: int
+    ) -> Optional[ImageMetadataRecord]:
+        row = await self.fetch_one(
+            """
+            SELECT
+                id,
+                image_id,
+                user_id,
+                faces_json,
+                ocr_text,
+                caption,
+                lat,
+                lon,
+                loc_description,
+                loc_city,
+                loc_state,
+                loc_country,
+                make,
+                model,
+                iso,
+                f_stop,
+                shutter_speed,
+                focal_length,
+                width,
+                height,
+                file_size_mb,
+                taken_at,
+                created_at,
+                updated_at
+            FROM image_metadata
+            WHERE image_id = ? AND user_id = ?
+            """,
+            (image_id, user_id),
+        )
+        return ImageMetadataRecord(**row) if row else None
+
+    async def upsert_image_metadata(
+        self,
+        *,
+        image_id: int,
+        user_id: int,
+        faces_json: str,
+        ocr_text: str,
+        caption: str,
+        lat: Optional[float],
+        lon: Optional[float],
+        loc_description: Optional[str],
+        loc_city: Optional[str],
+        loc_state: Optional[str],
+        loc_country: Optional[str],
+        make: Optional[str],
+        model: Optional[str],
+        iso: Optional[int],
+        f_stop: Optional[float],
+        shutter_speed: Optional[str],
+        focal_length: Optional[float],
+        width: Optional[int],
+        height: Optional[int],
+        file_size_mb: Optional[float],
+        taken_at: Optional[str],
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO image_metadata (
+                    image_id,
+                    user_id,
+                    faces_json,
+                    ocr_text,
+                    caption,
+                    lat,
+                    lon,
+                    loc_description,
+                    loc_city,
+                    loc_state,
+                    loc_country,
+                    make,
+                    model,
+                    iso,
+                    f_stop,
+                    shutter_speed,
+                    focal_length,
+                    width,
+                    height,
+                    file_size_mb,
+                    taken_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    faces_json=excluded.faces_json,
+                    ocr_text=excluded.ocr_text,
+                    caption=excluded.caption,
+                    lat=excluded.lat,
+                    lon=excluded.lon,
+                    loc_description=excluded.loc_description,
+                    loc_city=excluded.loc_city,
+                    loc_state=excluded.loc_state,
+                    loc_country=excluded.loc_country,
+                    make=excluded.make,
+                    model=excluded.model,
+                    iso=excluded.iso,
+                    f_stop=excluded.f_stop,
+                    shutter_speed=excluded.shutter_speed,
+                    focal_length=excluded.focal_length,
+                    width=excluded.width,
+                    height=excluded.height,
+                    file_size_mb=excluded.file_size_mb,
+                    taken_at=excluded.taken_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    image_id,
+                    user_id,
+                    faces_json,
+                    ocr_text,
+                    caption,
+                    lat,
+                    lon,
+                    loc_description,
+                    loc_city,
+                    loc_state,
+                    loc_country,
+                    make,
+                    model,
+                    iso,
+                    f_stop,
+                    shutter_speed,
+                    focal_length,
+                    width,
+                    height,
+                    file_size_mb,
+                    taken_at,
+                    now,
+                    now,
+                ),
+            )
+            await conn.commit()
 
     async def fetch_session_by_token_hash(
         self, token_hash: str

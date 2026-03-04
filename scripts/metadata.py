@@ -1,222 +1,448 @@
+from __future__ import annotations
+
+import io
+import json
 import os
-from typing import Dict, List
 import sys
+import threading
+from dataclasses import dataclass
+import importlib.util
+from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-import cv2
+# Keep imports lightweight; heavy deps are loaded lazily in helpers.
+try:  # Pillow is optional in the wider app but required for metadata extraction.
+    from PIL import Image, ImageFile
+    from PIL.ExifTags import GPSTAGS
+except Exception:  # pragma: no cover - optional dependency
+    Image = None
+    ImageFile = None
+    GPSTAGS = None
 
-from PIL import Image, ImageFile
-from PIL.ExifTags import GPSTAGS
-import pillow_heif
-from geopy.geocoders import Nominatim
-from transformers import AutoModelForCausalLM
-import torch
-from scripts.database_helper import init_db, save_photo_to_db, save_video_to_db
+if ImageFile:
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
 
-import easyocr
 
-# Setup
-pillow_heif.register_heif_opener()
-geolocator = Nominatim(user_agent="TagLens", domain="localhost:8080", scheme="http")
-if torch and torch.cuda.is_available():
-    device = "cuda"
-elif (
-    torch and getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()
-):
-    device = "mps"
-else:
-    device = "cpu"
+_OPTIONAL_DEP_SPECS = {
+    "pillow": "PIL",
+    "opencv-python": "cv2",
+    "numpy": "numpy",
+    "easyocr": "easyocr",
+    "torch": "torch",
+    "transformers": "transformers",
+    "geopy": "geopy",
+    "pillow-heif": "pillow_heif",
+}
 
-print(f"Using device: {device}")
 
-# if os.name == "nt":
-#     _tess_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-#     if os.path.exists(_tess_default):
-#         pytesseract.pytesseract.tesseract_cmd = _tess_default
+def dependency_report() -> Dict[str, bool]:
+    """Return availability for optional metadata dependencies."""
+    report: Dict[str, bool] = {}
+    for package, module in _OPTIONAL_DEP_SPECS.items():
+        report[package] = importlib.util.find_spec(module) is not None
+    return report
 
-model = None
-if AutoModelForCausalLM and torch:
+
+def missing_dependencies() -> List[str]:
+    """Return a list of missing optional dependencies."""
+    return [name for name, present in dependency_report().items() if not present]
+
+
+@dataclass
+class MetadataResult:
+    faces: List[Dict[str, int]]
+    ocr_text: str
+    caption: str
+    lat: Optional[float]
+    lon: Optional[float]
+    loc_description: Optional[str]
+    loc_city: Optional[str]
+    loc_state: Optional[str]
+    loc_country: Optional[str]
+    make: Optional[str]
+    model: Optional[str]
+    iso: Optional[int]
+    f_stop: Optional[float]
+    shutter_speed: Optional[str]
+    focal_length: Optional[float]
+    width: Optional[int]
+    height: Optional[int]
+    file_size_mb: Optional[float]
+    taken_at: Optional[str]
+
+
+_model_lock = threading.Lock()
+_caption_model = None
+
+_reader_lock = threading.Lock()
+_easyocr_reader = None
+
+_cascade_lock = threading.Lock()
+_face_cascade = None
+
+
+def _torch_available() -> bool:
     try:
-        model = AutoModelForCausalLM.from_pretrained(
-            "vikhyatk/moondream2",
-            trust_remote_code=True,
-            dtype=torch.bfloat16,
-            device_map=device,
-        )
-    except Exception as e:
-        print(f"Captioning model unavailable; skipping captions: {e}")
-
-reader = easyocr.Reader(["en"], gpu=True)
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+        import torch  # noqa: F401
+    except Exception:
+        return False
+    return True
 
 
-def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
-    """Detect faces (no identity) and return bounding boxes.
-    Returns a list of dicts with keys: x, y, w, h.
-    """
-    # Convert PIL image to grayscale numpy array for OpenCV
-    rgb = np.array(img)
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
-    )
-    return [
-        {"x": int(x), "y": int(y), "w": int(w), "h": int(h)} for (x, y, w, h) in faces
-    ]
-
-
-
-
-def ocr2(img):
-    result = None
-
-    # 3. Strip away any weird transparency layers (forces standard RGB)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
+def _torch_device() -> str:
     try:
-        # 2. Read the text
-        img_array = np.array(img)
-
-        text_list = reader.readtext(img_array, detail=0)
-        result = " ".join(text_list).strip()
-
-    except Exception as e:
-        print(f"OCR error {e}")
-    return result
-
-
-# Helper func
-def to_deci(val):
-    return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
+        import torch
+    except Exception:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
-def get_complete_metadata(path, conn, user_id):
-    # Open the image and time how long that takes
-    img = Image.open(path)
-
-    # Get basic metadata like size and whatnot
-    file_size_mb = os.path.getsize(path) / (1024 * 1024)
-    w, h = img.size
-    exif = img.getexif()
-    exif_ifd = exif.get_ifd(34665)  # Technical
-    gps_info = exif.get_ifd(34853)  # GPS
-
-    phone_make = exif.get(271, "Unknown")
-    phone_model = exif.get(272, "Unknown")
-    date = exif.get(36867) or exif.get(306) or None
-
-    # This is camera info
-    iso = exif_ifd.get(34855, None)
-    f_stop = exif_ifd.get(33437, None)
-    focal = exif_ifd.get(37386, None)
-    exposure = exif_ifd.get(33434, None)
-    shutter = (
-        f"1/{int(1/exposure)}"
-        if (isinstance(exposure, (int, float)) and exposure > 0 and exposure < 1)
-        else f"{exposure}"
-    )
-
-    # This is to get location data
-    location_data = None
-    lat = None
-    lon = None
-
-    if gps_info and len(gps_info) > 1:
-        raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
-
-        lat = raw_gps.get("GPSLatitude")
-        lon = raw_gps.get("GPSLongitude")
+def _get_caption_model():
+    global _caption_model
+    if _caption_model is not None:
+        return _caption_model
+    if not _torch_available():
+        return None
+    try:
+        from transformers import AutoModelForCausalLM
+        import torch
+    except Exception:
+        return None
+    with _model_lock:
+        if _caption_model is not None:
+            return _caption_model
         try:
-            if lat and lon:
-                lat = to_deci(lat)
-                lon = to_deci(lon)
-
-                if raw_gps.get("GPSLatitudeRef") == "S":
-                    lat = -lat
-                if raw_gps.get("GPSLongitudeRef") == "W":
-                    lon = -lon
-
-                try:
-                    # This reaches out to OpenStreetMap to get the name
-                    location_data = geolocator.reverse((lat, lon), language="en")
-                except Exception as e:
-                    location_data = None
-                    print(f"Location Error: {e}")
-        except ZeroDivisionError:
-            lat = None
-            lon = None
-
-    # Captioning
-    output_caption = None
-    if model:
-        try:
-            output_caption = model.caption(
-                img,
-                length="short",
+            _caption_model = AutoModelForCausalLM.from_pretrained(
+                "vikhyatk/moondream2",
+                trust_remote_code=True,
+                dtype=torch.bfloat16,
+                device_map=_torch_device(),
             )
-        except Exception as e:
-            print(f"Captioning Error: {e}")
-            output_caption = None
-
-    # OCR
-    ocr = ocr2(img)
-
-    metadata = dict()
-    metadata["filename"] = os.path.basename(path)
-    metadata["filepath"] = path
-    metadata["size"] = file_size_mb
-    metadata["w"] = w
-    metadata["h"] = h
-    metadata["make"] = phone_make
-    metadata["model"] = phone_model
-    metadata["date"] = date
-    metadata["iso"] = int(iso) if iso else None
-    metadata["f_stop"] = float(f_stop) if f_stop else None
-    metadata["shutter"] = str(shutter) if shutter else None
-    metadata["focal"] = float(focal) if focal else None
-    metadata["lat"] = lat
-    metadata["lon"] = lon
-    metadata["loc_description"] = None
-    metadata["loc_city"] = None
-    metadata["loc_state"] = None
-    metadata["loc_country"] = None
-    if location_data:
-        loc = str(location_data).split(", ")
-        if len(loc) >= 3:
-            metadata["loc_description"] = " ".join(loc[:-3])
-            metadata["loc_city"] = loc[-3]
-            metadata["loc_state"] = loc[-2]
-            metadata["loc_country"] = loc[-1]
-
-    metadata["caption"] = output_caption.get("caption", "") if isinstance(output_caption, dict) else (output_caption or "")
-    metadata["ocr"] = ocr
-
-    metadata["user_id"] = user_id
-
-    save_photo_to_db(conn, metadata)
+        except Exception:
+            _caption_model = None
+    return _caption_model
 
 
-def handle_video(path, conn, user_id):
-    # 1. Get basic file metadata
-    file_size_mb = os.path.getsize(path) / (1024 * 1024)
-    filename = os.path.basename(path)
+def _get_easyocr_reader():
+    global _easyocr_reader
+    if _easyocr_reader is not None:
+        return _easyocr_reader
+    try:
+        import easyocr
+    except Exception:
+        return None
+    gpu = False
+    if _torch_available():
+        try:
+            import torch
 
-    # 2. Package the metadata dictionary
-    # Keeping this strictly to the basics per your DB requirements:
-    # user_id, filepath, size, and filename (for B2 upload extension).
-    metadata = {
-        "filename": filename,
-        "filepath": path,
-        "size": file_size_mb,
-        "user_id": user_id,
+            gpu = torch.cuda.is_available()
+        except Exception:
+            gpu = False
+    with _reader_lock:
+        if _easyocr_reader is not None:
+            return _easyocr_reader
+        try:
+            _easyocr_reader = easyocr.Reader(["en"], gpu=gpu)
+        except Exception:
+            _easyocr_reader = None
+    return _easyocr_reader
+
+
+def _optional_cv2():
+    try:
+        import cv2
+    except Exception:
+        return None
+    return cv2
+
+
+def _optional_numpy():
+    try:
+        import numpy as np
+    except Exception:
+        return None
+    return np
+
+
+def _optional_geopy():
+    try:
+        from geopy.geocoders import Nominatim
+    except Exception:
+        return None
+    return Nominatim
+
+
+def _optional_heif():
+    try:
+        import pillow_heif
+    except Exception:
+        return None
+    return pillow_heif
+
+
+def _register_heif() -> None:
+    heif = _optional_heif()
+    if heif:
+        try:
+            heif.register_heif_opener()
+        except Exception:
+            return
+
+
+def _to_deci(val: Any) -> Optional[float]:
+    try:
+        return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
+    except Exception:
+        return None
+
+
+def _extract_gps(exif: Any) -> Tuple[Optional[float], Optional[float]]:
+    if not GPSTAGS or not exif:
+        return None, None
+    gps_info = exif.get_ifd(34853) if hasattr(exif, "get_ifd") else None
+    if not gps_info:
+        return None, None
+    raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
+    lat = raw_gps.get("GPSLatitude")
+    lon = raw_gps.get("GPSLongitude")
+    lat_val = _to_deci(lat) if lat else None
+    lon_val = _to_deci(lon) if lon else None
+    if lat_val is None or lon_val is None:
+        return None, None
+    if raw_gps.get("GPSLatitudeRef") == "S":
+        lat_val = -lat_val
+    if raw_gps.get("GPSLongitudeRef") == "W":
+        lon_val = -lon_val
+    return lat_val, lon_val
+
+
+def _reverse_geocode(lat: float, lon: float) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    Nominatim = _optional_geopy()
+    if not Nominatim:
+        return None, None, None, None
+    try:
+        geolocator = Nominatim(user_agent="TagLens")
+        location_data = geolocator.reverse((lat, lon), language="en")
+    except Exception:
+        return None, None, None, None
+    if not location_data:
+        return None, None, None, None
+    loc = str(location_data).split(", ")
+    if len(loc) < 3:
+        return None, None, None, None
+    return " ".join(loc[:-3]), loc[-3], loc[-2], loc[-1]
+
+
+def _get_face_cascade():
+    global _face_cascade
+    if _face_cascade is not None:
+        return _face_cascade
+    cv2 = _optional_cv2()
+    if not cv2:
+        return None
+    with _cascade_lock:
+        if _face_cascade is not None:
+            return _face_cascade
+        try:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            _face_cascade = cv2.CascadeClassifier(cascade_path)
+        except Exception:
+            _face_cascade = None
+    return _face_cascade
+
+
+def _extract_faces(img: "Image.Image") -> List[Dict[str, int]]:
+    face_cascade = _get_face_cascade()
+    np = _optional_numpy()
+    if not face_cascade or not np:
+        return []
+    cv2 = _optional_cv2()
+    if not cv2:
+        return []
+    try:
+        rgb = np.array(img)
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+        )
+        return [
+            {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+            for (x, y, w, h) in faces
+        ]
+    except Exception:
+        return []
+
+
+def _extract_ocr(img: "Image.Image") -> str:
+    reader = _get_easyocr_reader()
+    if reader is None:
+        return ""
+    np = _optional_numpy()
+    if not np:
+        return ""
+    try:
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img_array = np.array(img)
+        text_list = reader.readtext(img_array, detail=0)
+        return " ".join(text_list).strip()
+    except Exception:
+        return ""
+
+
+def _extract_caption(img: "Image.Image") -> str:
+    model = _get_caption_model()
+    if model is None:
+        return ""
+    try:
+        output = model.caption(img, length="short")
+    except Exception:
+        return ""
+    if isinstance(output, dict):
+        return str(output.get("caption", "")).strip()
+    return str(output or "").strip()
+
+
+def _extract_exif(img: "Image.Image") -> Dict[str, Any]:
+    exif = img.getexif() if hasattr(img, "getexif") else None
+    if not exif:
+        return {
+            "make": None,
+            "model": None,
+            "date": None,
+            "iso": None,
+            "f_stop": None,
+            "shutter_speed": None,
+            "focal_length": None,
+            "lat": None,
+            "lon": None,
+        }
+    exif_ifd = exif.get_ifd(34665) if hasattr(exif, "get_ifd") else {}
+    make = exif.get(271)
+    model = exif.get(272)
+    date = exif.get(36867) or exif.get(306)
+    iso = exif_ifd.get(34855)
+    f_stop = exif_ifd.get(33437)
+    focal = exif_ifd.get(37386)
+    exposure = exif_ifd.get(33434)
+    shutter_speed = None
+    if isinstance(exposure, (int, float)) and exposure > 0 and exposure < 1:
+        shutter_speed = f"1/{int(1/exposure)}"
+    elif exposure is not None:
+        shutter_speed = str(exposure)
+    lat, lon = _extract_gps(exif)
+    return {
+        "make": str(make) if make is not None else None,
+        "model": str(model) if model is not None else None,
+        "date": str(date) if date is not None else None,
+        "iso": int(iso) if iso else None,
+        "f_stop": float(f_stop) if f_stop else None,
+        "shutter_speed": shutter_speed,
+        "focal_length": float(focal) if focal else None,
+        "lat": lat,
+        "lon": lon,
     }
 
-    # Hand off to the SQLite DB
-    save_video_to_db(conn, metadata)
+
+def extract_metadata_from_image(
+    img: "Image.Image",
+    *,
+    file_size_mb: Optional[float] = None,
+) -> MetadataResult:
+    exif = _extract_exif(img)
+    lat = exif.get("lat")
+    lon = exif.get("lon")
+    loc_description = loc_city = loc_state = loc_country = None
+    if lat is not None and lon is not None:
+        loc_description, loc_city, loc_state, loc_country = _reverse_geocode(lat, lon)
+
+    faces = _extract_faces(img)
+    ocr_text = _extract_ocr(img)
+    caption = _extract_caption(img)
+
+    width, height = img.size if hasattr(img, "size") else (None, None)
+
+    return MetadataResult(
+        faces=faces,
+        ocr_text=ocr_text,
+        caption=caption,
+        lat=lat,
+        lon=lon,
+        loc_description=loc_description,
+        loc_city=loc_city,
+        loc_state=loc_state,
+        loc_country=loc_country,
+        make=exif.get("make"),
+        model=exif.get("model"),
+        iso=exif.get("iso"),
+        f_stop=exif.get("f_stop"),
+        shutter_speed=exif.get("shutter_speed"),
+        focal_length=exif.get("focal_length"),
+        width=width,
+        height=height,
+        file_size_mb=file_size_mb,
+        taken_at=exif.get("date"),
+    )
+
+
+def extract_metadata_from_bytes(
+    image_bytes: bytes,
+    *,
+    filename: Optional[str] = None,
+) -> Optional[MetadataResult]:
+    if Image is None:
+        return None
+    if not image_bytes:
+        return None
+    _register_heif()
+    try:
+        img = Image.open(io.BytesIO(image_bytes))  # type: ignore[name-defined]
+    except Exception:
+        return None
+    file_size_mb = len(image_bytes) / (1024 * 1024)
+    return extract_metadata_from_image(img, file_size_mb=file_size_mb)
+
+
+def extract_metadata_from_path(path: str) -> Optional[MetadataResult]:
+    if Image is None:
+        return None
+    if not os.path.exists(path):
+        return None
+    _register_heif()
+    try:
+        img = Image.open(path)
+    except Exception:
+        return None
+    file_size_mb = os.path.getsize(path) / (1024 * 1024)
+    return extract_metadata_from_image(img, file_size_mb=file_size_mb)
+
+
+def metadata_to_dict(result: MetadataResult) -> Dict[str, Any]:
+    return {
+        "faces": result.faces,
+        "ocr_text": result.ocr_text,
+        "caption": result.caption,
+        "lat": result.lat,
+        "lon": result.lon,
+        "loc_description": result.loc_description,
+        "loc_city": result.loc_city,
+        "loc_state": result.loc_state,
+        "loc_country": result.loc_country,
+        "make": result.make,
+        "model": result.model,
+        "iso": result.iso,
+        "f_stop": result.f_stop,
+        "shutter_speed": result.shutter_speed,
+        "focal_length": result.focal_length,
+        "width": result.width,
+        "height": result.height,
+        "file_size_mb": result.file_size_mb,
+        "taken_at": result.taken_at,
+    }
 
 
 if __name__ == "__main__":
@@ -224,8 +450,8 @@ if __name__ == "__main__":
         print("Usage: python metadata.py <image_path>")
         sys.exit(1)
     target = sys.argv[1]
-    curr = init_db()
-    if not os.path.exists(target):
-        print(f"Input image not found: {target}")
-    else:
-        get_complete_metadata(target, curr, 1)
+    result = extract_metadata_from_path(target)
+    if not result:
+        print("Metadata extraction failed or dependencies missing.")
+        sys.exit(2)
+    print(json.dumps(metadata_to_dict(result), indent=2))

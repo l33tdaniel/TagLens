@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
 import base64
@@ -45,6 +45,18 @@ from auth import (
 )
 from database import Database, SessionRecord, UserRecord
 import aiosqlite
+try:  # Optional metadata pipeline (best-effort).
+    from scripts.metadata import (
+        extract_metadata_from_bytes,
+        metadata_to_dict,
+        dependency_report,
+        missing_dependencies,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    extract_metadata_from_bytes = None
+    metadata_to_dict = None
+    dependency_report = None
+    missing_dependencies = None
 
 # Author: Daniel Neugent
 
@@ -114,6 +126,15 @@ async def _ensure_database() -> None:
     """Prepare the sqlite file before handling the first request."""
     await db.initialize()
     _initialize_b2_bucket()
+    if _metadata_enabled():
+        if missing_dependencies is None:
+            logger.warning("metadata deps check unavailable: metadata module import failed")
+        else:
+            missing = missing_dependencies()
+            if missing:
+                logger.warning("metadata deps missing: %s", ", ".join(missing))
+            else:
+                logger.info("metadata deps satisfied")
 
 
 app.startup_handler(_ensure_database)
@@ -295,98 +316,6 @@ def _html_response(body: str, *, status: int = 200) -> Response:
     )
 
 
-def _build_nav(user: Optional[UserRecord], csrf_token: Optional[str]) -> str:
-    """Render the shared navigation bar shown at the top of every page."""
-    links = ['<a href="/">Home</a>']
-    if user:
-        logout_html = ""
-        if csrf_token:
-            logout_html = f"""
-                <form method="post" action="/logout" class="logout-form">
-                  <input type="hidden" name="csrf_token" value="{escape(csrf_token)}">
-                  <button type="submit">Log out</button>
-                </form>
-            """
-        links.extend(
-            [
-                '<a href="/dashboard">Dashboard</a>',
-                '<a href="/profile">Profile</a>',
-                f'<span class="status">Signed in as {escape(user.username)}</span>',
-            ]
-        )
-        if logout_html:
-            links.append(logout_html)
-    else:
-        links.extend(
-            [
-                '<a href="/register">Register</a>',
-                '<a href="/login">Log in</a>',
-            ]
-        )
-    return """<nav>""" + " | ".join(links) + """</nav>"""
-
-
-def _message_block(messages: Iterable[str], kind: str = "info") -> str:
-    """Return a styled message list, used for errors and confirmations."""
-    if not messages:
-        return ""
-    items = "".join(f"<li>{escape(text)}</li>" for text in messages)
-    return f"""
-        <div class=\"message {kind}\">
-            <ul>{items}</ul>
-        </div>
-    """
-
-
-def _page_template(
-    *,
-    title: str,
-    body: str,
-    user: Optional[UserRecord] = None,
-    csrf_token: Optional[str] = None,
-    messages: Iterable[str] | None = None,
-    message_kind: str = "info",
-) -> str:
-    """Wrap any page body inside a styled template with optional flash messages."""
-    nav = _build_nav(user, csrf_token)
-    message_html = _message_block(messages or [], message_kind)
-    return f"""
-<!doctype html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">
-  <title>{escape(title)}</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; max-width: 900px; margin: 0 auto; padding: 1.5rem; }}
-    nav {{ margin-bottom: 1rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }}
-    nav a {{ text-decoration: none; color: #0f62fe; font-weight: 600; }}
-    nav .logout-form {{ display: inline; margin: 0; }}
-    nav .logout-form button {{ width: auto; padding: 0.35rem 0.75rem; font-size: 0.9rem; }}
-    .message {{ border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }}
-    .message.info {{ background: #e8f0fe; border: 1px solid #bad1fe; }}
-    .message.error {{ background: #ffe3e3; border: 1px solid #f5b7b7; }}
-    .status {{ font-weight: 600; }}
-    footer {{ margin-top: 3rem; font-size: 0.9rem; color: #555; }}
-    input, button {{ font: inherit; margin-top: 0.25rem; width: 100%; padding: 0.6rem; border-radius: 6px; border: 1px solid #c4c4c4; }}
-    button {{ cursor: pointer; background: #0f62fe; border: none; color: white; font-weight: 600; }}
-    form {{ max-width: 380px; }}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>{escape(title)}</h1>
-    {nav}
-  </header>
-  <main>
-    {message_html}
-    {body}
-  </main>
-  <footer>This service is run with Robyn and keeps credentials hashed.</footer>
-</body>
-</html>
-"""
-
 
 async def _get_auth_context(request: Request) -> AuthContext:
     """Resolve the current user and session from the cookie, if present."""
@@ -404,13 +333,14 @@ async def _get_auth_context(request: Request) -> AuthContext:
     user = await db.fetch_user_by_id(session.user_id)
     if not user:
         return AuthContext(user=None, session=None, clear_cookie=True)
-    await db.touch_session(session.id, _now_iso())
+    # Throttle session touch to once per 5 minutes to reduce write I/O
+    try:
+        last_seen = _as_utc(datetime.fromisoformat(session.last_seen_at))
+        if (_utc_now() - last_seen).total_seconds() > 300:
+            await db.touch_session(session.id, _now_iso())
+    except (ValueError, TypeError):
+        await db.touch_session(session.id, _now_iso())
     return AuthContext(user=user, session=session, clear_cookie=False)
-
-
-async def _current_user(request: Request) -> Optional[UserRecord]:
-    """Resolve the current user from the session cookie (if present)."""
-    return (await _get_auth_context(request)).user
 
 
 def _redirect(location: str) -> Response:
@@ -436,6 +366,19 @@ def _ollama_endpoint() -> str:
 
 def _ollama_model() -> str:
     return os.getenv("OLLAMA_MODEL", "llava")
+
+
+def _metadata_enabled() -> bool:
+    raw = os.getenv("TAGLENS_METADATA_ENABLED", "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _metadata_dependency_report() -> dict:
+    if dependency_report is None:
+        return {"available": {}, "missing": ["metadata_module_unavailable"]}
+    report = dependency_report()
+    missing = [name for name, present in report.items() if not present]
+    return {"available": report, "missing": missing}
 
 
 def _normalize_content_type(content_type: str, filename: str) -> str:
@@ -488,10 +431,13 @@ def _photo_file_key(user_id: int, photo_id: int, filename: str) -> str:
     return f"{user_id}/{photo_id}{ext}"
 
 
-def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Optional[bytes]:
+def _photo_thumbnail_key(user_id: int, photo_id: int) -> str:
+    return f"{user_id}/{photo_id}_thumb.webp"
+
+
+def _fetch_bucket_bytes(file_key: str) -> Optional[bytes]:
     if bucket is None:
         return None
-    file_key = _photo_file_key(user_id, photo_id, filename)
     auth_token = bucket.get_download_authorization(
         file_key,
         valid_duration_in_seconds=300,
@@ -500,6 +446,40 @@ def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Opt
     signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
     with urllib_request.urlopen(signed_url, timeout=30) as response:
         return response.read()
+
+
+def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Optional[bytes]:
+    file_key = _photo_file_key(user_id, photo_id, filename)
+    return _fetch_bucket_bytes(file_key)
+
+
+def _delete_bucket_file_by_name(file_key: str) -> None:
+    if bucket is None:
+        return
+    try:
+        info = bucket.get_file_info_by_name(file_key)
+        file_id = getattr(info, "id_", None) or getattr(info, "file_id", None)
+        if not file_id:
+            raise RuntimeError("Backblaze file id missing for delete")
+        bucket.delete_file_version(file_id, file_key)
+    except Exception as exc:
+        msg = str(exc).lower()
+        if any(token in msg for token in ("not found", "not_present", "not present", "no such")):
+            return
+        # Fallback: try listing versions by name.
+        try:
+            versions = bucket.list_file_versions(file_key)
+            for version in versions:
+                file_id = getattr(version, "id_", None) or getattr(version, "file_id", None)
+                file_name = getattr(version, "file_name", None) or file_key
+                if file_id:
+                    bucket.delete_file_version(file_id, file_name)
+                    return
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(token in msg for token in ("not found", "not_present", "not present", "no such")):
+                return
+            raise
 
 
 def _photo_view_response(user_id: int, photo_id: int, record) -> Response:
@@ -560,6 +540,74 @@ def _generate_image_description_with_ollama(
     return f"{description}"
 
 
+async def _process_image_metadata(
+    *,
+    image_id: int,
+    user_id: int,
+    filename: str,
+    image_bytes: bytes,
+) -> None:
+    if not _metadata_enabled():
+        return
+    if extract_metadata_from_bytes is None or metadata_to_dict is None:
+        logger.info(
+            "metadata extraction skipped image_id=%s reason=deps_missing",
+            image_id,
+        )
+        return
+    try:
+        result = await asyncio.to_thread(
+            extract_metadata_from_bytes,
+            image_bytes,
+            filename=filename,
+        )
+    except Exception:
+        logger.exception(
+            "metadata extraction failed image_id=%s filename=%s",
+            image_id,
+            filename,
+        )
+        return
+    if not result:
+        logger.info(
+            "metadata extraction skipped image_id=%s reason=empty_result",
+            image_id,
+        )
+        return
+    data = metadata_to_dict(result)
+    try:
+        await db.upsert_image_metadata(
+            image_id=image_id,
+            user_id=user_id,
+            faces_json=json.dumps(data.get("faces") or []),
+            ocr_text=str(data.get("ocr_text") or ""),
+            caption=str(data.get("caption") or ""),
+            lat=data.get("lat"),
+            lon=data.get("lon"),
+            loc_description=data.get("loc_description"),
+            loc_city=data.get("loc_city"),
+            loc_state=data.get("loc_state"),
+            loc_country=data.get("loc_country"),
+            make=data.get("make"),
+            model=data.get("model"),
+            iso=data.get("iso"),
+            f_stop=data.get("f_stop"),
+            shutter_speed=data.get("shutter_speed"),
+            focal_length=data.get("focal_length"),
+            width=data.get("width"),
+            height=data.get("height"),
+            file_size_mb=data.get("file_size_mb"),
+            taken_at=data.get("taken_at"),
+        )
+        logger.info("metadata stored image_id=%s filename=%s", image_id, filename)
+    except Exception:
+        logger.exception(
+            "metadata store failed image_id=%s filename=%s",
+            image_id,
+            filename,
+        )
+
+
 def _redirect_with_next(path: str, *, query: Optional[str] = None) -> Response:
     """Append a query string (usually the original destination) before redirecting."""
     dest = path
@@ -586,72 +634,6 @@ async def _ensure_authenticated(request: Request) -> Response | AuthContext:
     if context.clear_cookie:
         _clear_session_cookie(response)
     return response
-
-
-def _login_form(
-    next_path: str,
-    csrf_token: str,
-    *,
-    messages: Iterable[str] | None = None,
-) -> str:
-    """Render the login form, optionally showing validation errors."""
-    return f"""
-    <section>
-      <h2>Log in</h2>
-      {_message_block(messages or [], 'error')}
-      <form method=\"post\">
-        <label>
-          Email
-          <input type=\"email\" name=\"email\" required autofocus>
-        </label>
-        <label>
-          Password
-        <input type=\"password\" name=\"password\" required minlength=8>
-      </label>
-      <input type=\"hidden\" name=\"next\" value=\"{escape(next_path)}\">
-      <input type=\"hidden\" name=\"csrf_token\" value=\"{escape(csrf_token)}\">
-      <button type=\"submit\">Sign in</button>
-      </form>
-    </section>
-    """
-
-
-def _register_form(
-    csrf_token: str,
-    values: dict[str, str] | None = None,
-    *,
-    messages: Iterable[str] | None = None,
-) -> str:
-    """Return the registration form while preserving prior input and errors."""
-    vals = values or {}
-    username = escape(vals.get("username", ""))
-    email = escape(vals.get("email", ""))
-    return f"""
-    <section>
-      <h2>Create an account</h2>
-      {_message_block(messages or [], 'error')}
-      <form method=\"post\">
-        <label>
-          Username
-          <input type=\"text\" name=\"username\" value=\"{username}\" required minlength=3 maxlength=50>
-        </label>
-        <label>
-          Email
-          <input type=\"email\" name=\"email\" value=\"{email}\" required>
-        </label>
-        <label>
-          Password
-          <input type=\"password\" name=\"password\" required minlength=8>
-        </label>
-        <label>
-          Confirm password
-          <input type=\"password\" name=\"confirm_password\" required minlength=8>
-        </label>
-        <input type=\"hidden\" name=\"csrf_token\" value=\"{escape(csrf_token)}\">
-        <button type=\"submit\">Create account</button>
-      </form>
-    </section>
-    """
 
 
 @app.get("/")
@@ -893,6 +875,7 @@ async def upload_photo_api(request: Request) -> Response:
         # 2. Insert metadata first to get photo_id.
         # Keep blob data only when B2 is unavailable.
         image_blob = image_bytes if bucket is None else None
+        thumbnail_blob = thumbnail_data if bucket is None else None
         saved = await db.create_image_metadata(
             filename=filename,
             faces_json="[]",
@@ -901,7 +884,7 @@ async def upload_photo_api(request: Request) -> Response:
             ai_description=description,
             content_type=content_type,
             image_data=image_blob,
-            thumbnail_data=thumbnail_data,
+            thumbnail_data=thumbnail_blob,
             thumbnail_content_type="image/webp",
             taken_at=taken_at,
         )
@@ -924,6 +907,14 @@ async def upload_photo_api(request: Request) -> Response:
                 b2_key,
                 content_type=content_type,
             )
+            if thumbnail_data:
+                thumb_key = _photo_thumbnail_key(auth.user.id, photo_id)
+                await asyncio.to_thread(
+                    bucket.upload_bytes,
+                    thumbnail_data,
+                    thumb_key,
+                    content_type="image/webp",
+                )
     except Exception:
         logger.exception(
             "upload file storage failed user_id=%s photo_id=%s filename=%s",
@@ -942,6 +933,14 @@ async def upload_photo_api(request: Request) -> Response:
         auth.user.id,
         saved.id,
         filename,
+    )
+    asyncio.create_task(
+        _process_image_metadata(
+            image_id=saved.id,
+            user_id=auth.user.id,
+            filename=filename,
+            image_bytes=image_bytes,
+        )
     )
     return _json_response(
         {
@@ -996,6 +995,66 @@ async def download_photo_api(request: Request) -> Response:
         }
     )
 
+
+@app.get("/api/photos/metadata")
+async def photo_metadata_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+
+    raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
+    if not raw_photo_id.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(raw_photo_id)
+
+    record = await db.fetch_image_metadata_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "metadata not found"}, status=404)
+
+    try:
+        faces = json.loads(record.faces_json or "[]")
+    except json.JSONDecodeError:
+        faces = []
+
+    return _json_response(
+        {
+            "image_id": record.image_id,
+            "faces": faces,
+            "ocr_text": record.ocr_text,
+            "caption": record.caption,
+            "lat": record.lat,
+            "lon": record.lon,
+            "loc_description": record.loc_description,
+            "loc_city": record.loc_city,
+            "loc_state": record.loc_state,
+            "loc_country": record.loc_country,
+            "make": record.make,
+            "model": record.model,
+            "iso": record.iso,
+            "f_stop": record.f_stop,
+            "shutter_speed": record.shutter_speed,
+            "focal_length": record.focal_length,
+            "width": record.width,
+            "height": record.height,
+            "file_size_mb": record.file_size_mb,
+            "taken_at": record.taken_at,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+    )
+
+
+@app.get("/api/metadata/deps")
+async def metadata_deps_api(_: Request) -> Response:
+    report = _metadata_dependency_report()
+    return _json_response(
+        {
+            "enabled": _metadata_enabled(),
+            "missing": report["missing"],
+            "available": report["available"],
+        }
+    )
+
 @app.get("/api/photos/view")
 async def view_photo(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1029,6 +1088,23 @@ async def view_photo_thumbnail(request: Request) -> Response:
         return Response(status_code=404, headers={}, description="Not found")
 
     if record.thumbnail_data:
+        if bucket is not None:
+            try:
+                thumb_key = _photo_thumbnail_key(auth.user.id, photo_id)
+                await asyncio.to_thread(
+                    bucket.upload_bytes,
+                    record.thumbnail_data,
+                    thumb_key,
+                    content_type=record.thumbnail_content_type or "image/webp",
+                )
+                await db.clear_image_thumbnail(photo_id, auth.user.id)
+            except Exception:
+                logger.warning(
+                    "thumbnail migrate failed user_id=%s photo_id=%s",
+                    auth.user.id,
+                    photo_id,
+                    exc_info=True,
+                )
         return Response(
             status_code=200,
             headers={
@@ -1037,6 +1113,26 @@ async def view_photo_thumbnail(request: Request) -> Response:
             },
             description=record.thumbnail_data,
         )
+    if bucket is not None:
+        try:
+            thumb_key = _photo_thumbnail_key(auth.user.id, photo_id)
+            thumbnail_data = await asyncio.to_thread(_fetch_bucket_bytes, thumb_key)
+            if thumbnail_data:
+                return Response(
+                    status_code=200,
+                    headers={
+                        "content-type": "image/webp",
+                        "cache-control": "private, max-age=86400",
+                    },
+                    description=thumbnail_data,
+                )
+        except Exception:
+            logger.warning(
+                "thumbnail fetch failed user_id=%s photo_id=%s",
+                auth.user.id,
+                photo_id,
+                exc_info=True,
+            )
     image_bytes: Optional[bytes] = record.image_data
     if image_bytes is None:
         try:
@@ -1060,12 +1156,29 @@ async def view_photo_thumbnail(request: Request) -> Response:
             thumbnail_data = await asyncio.to_thread(
                 _generate_thumbnail_webp, image_bytes
             )
-            await db.update_image_thumbnail(
-                photo_id,
-                auth.user.id,
-                thumbnail_data,
-                "image/webp",
-            )
+            if bucket is not None:
+                try:
+                    thumb_key = _photo_thumbnail_key(auth.user.id, photo_id)
+                    await asyncio.to_thread(
+                        bucket.upload_bytes,
+                        thumbnail_data,
+                        thumb_key,
+                        content_type="image/webp",
+                    )
+                except Exception:
+                    logger.warning(
+                        "thumbnail upload failed user_id=%s photo_id=%s",
+                        auth.user.id,
+                        photo_id,
+                        exc_info=True,
+                    )
+            else:
+                await db.update_image_thumbnail(
+                    photo_id,
+                    auth.user.id,
+                    thumbnail_data,
+                    "image/webp",
+                )
             return Response(
                 status_code=200,
                 headers={
@@ -1102,6 +1215,27 @@ async def delete_photo_api(request: Request) -> Response:
         )
     photo_id = int(photo_id_raw)
     logger.info("delete requested user_id=%s photo_id=%s", auth.user.id, photo_id)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        logger.warning(
+            "delete rejected user_id=%s photo_id=%s reason=not_found",
+            auth.user.id,
+            photo_id,
+        )
+        return _json_response({"error": "photo not found"}, status=404)
+    if bucket is not None:
+        try:
+            image_key = _photo_file_key(auth.user.id, photo_id, record.filename)
+            await asyncio.to_thread(_delete_bucket_file_by_name, image_key)
+            thumb_key = _photo_thumbnail_key(auth.user.id, photo_id)
+            await asyncio.to_thread(_delete_bucket_file_by_name, thumb_key)
+        except Exception:
+            logger.exception(
+                "delete failed user_id=%s photo_id=%s reason=b2_error",
+                auth.user.id,
+                photo_id,
+            )
+            return _json_response({"error": "delete failed unexpectedly"}, status=500)
     try:
         deleted = await db.delete_image_for_user(photo_id, auth.user.id)
     except Exception:
