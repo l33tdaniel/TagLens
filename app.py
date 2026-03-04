@@ -586,6 +586,7 @@ async def _process_image_metadata(
         if caption:
             await db.update_image_description(image_id, user_id, caption)
             logger.info("ai_description updated image_id=%s", image_id)
+        await db.populate_fts_for_image(image_id, user_id)
     except Exception:
         logger.exception(
             "metadata store failed image_id=%s filename=%s",
@@ -765,6 +766,71 @@ async def profile_api(request: Request) -> Response:
             ],
         }
     )
+
+
+@app.get("/api/photos/search")
+async def search_photos_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    user = auth.user
+    query = str(request.query_params.get("q", "")).strip()
+    sort_by = str(request.query_params.get("sort_by", "uploaded")).strip().lower()
+    order = str(request.query_params.get("order", "desc")).strip().lower()
+    if sort_by not in {"uploaded", "taken"}:
+        return _json_response({"error": "sort_by must be uploaded or taken"}, status=400)
+    if order not in {"asc", "desc"}:
+        return _json_response({"error": "order must be asc or desc"}, status=400)
+
+    if not query:
+        images = await db.list_images_for_user(user.id, sort_by=sort_by, order=order)
+    else:
+        images = await db.search_images_for_user(user.id, query, sort_by=sort_by, order=order)
+
+    return _json_response({
+        "photos": [
+            {
+                "id": r.id,
+                "filename": r.filename,
+                "created_at": r.created_at,
+                "taken_at": r.taken_at,
+                "description": r.ai_description,
+                "ocr_text": r.ocr_text,
+            }
+            for r in images
+        ],
+    })
+
+
+@app.put("/api/photos/description")
+async def update_photo_description_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return _json_response({"error": "invalid JSON body"}, status=400)
+
+    photo_id = body.get("photo_id")
+    description = body.get("description")
+    if not isinstance(photo_id, int) or description is None:
+        return _json_response({"error": "photo_id (int) and description (string) required"}, status=400)
+
+    description = str(description).strip()
+    if len(description) > 2000:
+        return _json_response({"error": "description too long (max 2000 chars)"}, status=400)
+
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+
+    await db.update_image_description(photo_id, auth.user.id, description)
+    await db.populate_fts_for_image(photo_id, auth.user.id)
+    return _json_response({"ok": True, "description": description})
 
 
 @app.post("/api/photos")

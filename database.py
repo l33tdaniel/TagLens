@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 from pathlib import Path
+import re
 from typing import Any, AsyncIterator, Optional, Sequence
 
 import aiosqlite
@@ -224,7 +225,29 @@ class Database:
                 )
             except aiosqlite.OperationalError:
                 pass
+
+            # FTS5 full-text search index
+            await conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS images_fts USING fts5(
+                    image_id UNINDEXED,
+                    filename,
+                    ai_description,
+                    ocr_text,
+                    caption,
+                    location,
+                    content='',
+                    tokenize='porter unicode61'
+                )
+            """)
+
             await conn.commit()
+
+            # Populate FTS index from existing data if empty
+            cursor = await conn.execute("SELECT COUNT(*) FROM images_fts")
+            fts_count = (await cursor.fetchone())[0]
+            await cursor.close()
+            if fts_count == 0:
+                await self._rebuild_fts_index(conn)
 
     async def fetch_one(
         self, query: str, params: Sequence[Any]
@@ -694,3 +717,108 @@ class Database:
                 (revoked_at, token_hash),
             )
             await conn.commit()
+
+    # ── FTS5 Search ─────────────────────────────────────────
+
+    async def populate_fts_for_image(self, image_id: int, user_id: int) -> None:
+        async with self._connection() as conn:
+            # Gather text from both tables
+            cursor = await conn.execute(
+                "SELECT filename, ai_description, ocr_text FROM images WHERE id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            img_row = await cursor.fetchone()
+            await cursor.close()
+            if not img_row:
+                return
+
+            cursor = await conn.execute(
+                "SELECT caption, ocr_text, loc_description, loc_city, loc_state, loc_country FROM image_metadata WHERE image_id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            meta_row = await cursor.fetchone()
+            await cursor.close()
+
+            caption = ""
+            location = ""
+            meta_ocr = ""
+            if meta_row:
+                caption = meta_row["caption"] or ""
+                meta_ocr = meta_row["ocr_text"] or ""
+                location = " ".join(
+                    filter(None, [meta_row["loc_description"], meta_row["loc_city"],
+                                  meta_row["loc_state"], meta_row["loc_country"]])
+                )
+
+            ocr_text = img_row["ocr_text"] or meta_ocr
+
+            # Delete old entry then insert (contentless FTS doesn't support UPDATE)
+            await conn.execute("DELETE FROM images_fts WHERE image_id = ?", (str(image_id),))
+            await conn.execute(
+                "INSERT INTO images_fts (image_id, filename, ai_description, ocr_text, caption, location) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(image_id), img_row["filename"] or "", img_row["ai_description"] or "", ocr_text, caption, location),
+            )
+            await conn.commit()
+
+    async def search_images_for_user(
+        self,
+        user_id: int,
+        query: str,
+        *,
+        sort_by: str = "uploaded",
+        order: str = "desc",
+        limit: int = 50,
+    ) -> list[ImageRecord]:
+        # Escape FTS5 special characters and wrap each token with *
+        clean = re.sub(r'[^\w\s]', ' ', query).strip()
+        if not clean:
+            return []
+        tokens = clean.split()
+        fts_query = " ".join(f'"{t}"*' for t in tokens)
+
+        sort_clause = "i.created_at"
+        if sort_by == "taken":
+            sort_clause = "COALESCE(i.taken_at, i.created_at)"
+        order_clause = "DESC" if order.lower() == "desc" else "ASC"
+
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                f"""
+                SELECT
+                    i.id, i.user_id, i.filename, i.faces_json, i.ocr_text,
+                    i.ai_description, i.content_type,
+                    NULL AS image_data, NULL AS thumbnail_data,
+                    i.thumbnail_content_type, i.taken_at, i.created_at
+                FROM images_fts f
+                JOIN images i ON CAST(f.image_id AS INTEGER) = i.id
+                WHERE images_fts MATCH ? AND i.user_id = ?
+                ORDER BY {sort_clause} {order_clause}, i.id DESC
+                LIMIT ?
+                """,
+                (fts_query, user_id, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [ImageRecord(**row) for row in rows]
+
+    async def _rebuild_fts_index(self, conn: aiosqlite.Connection) -> None:
+        cursor = await conn.execute("""
+            SELECT i.id, i.filename, i.ai_description, i.ocr_text,
+                   m.caption, m.ocr_text AS meta_ocr,
+                   m.loc_description, m.loc_city, m.loc_state, m.loc_country
+            FROM images i
+            LEFT JOIN image_metadata m ON m.image_id = i.id
+        """)
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            location = " ".join(
+                filter(None, [row["loc_description"], row["loc_city"],
+                              row["loc_state"], row["loc_country"]])
+            )
+            ocr = row["ocr_text"] or row["meta_ocr"] or ""
+            await conn.execute(
+                "INSERT INTO images_fts (image_id, filename, ai_description, ocr_text, caption, location) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(row["id"]), row["filename"] or "", row["ai_description"] or "", ocr, row["caption"] or "", location),
+            )
+        await conn.commit()

@@ -75,6 +75,8 @@
       <div class="mb-6 flex flex-wrap items-center justify-between gap-4">
         <h3 class="text-2xl font-semibold text-gray-900">Your Gallery</h3>
         <div class="flex items-center gap-3">
+          <input id="searchInput" type="text" placeholder="Search photos..."
+                 class="rounded-full border border-orange-300 bg-white/80 px-4 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-orange-200" />
           <label for="sortBy" class="text-sm text-gray-600">Sort by</label>
           <select id="sortBy" class="rounded-full border border-orange-300 bg-white/80 px-3 py-2 text-sm">
             <option value="uploaded">Date Uploaded</option>
@@ -94,14 +96,27 @@
 
   <!-- Lightbox -->
   <div id="lightbox"
-       class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+       class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm overflow-y-auto"
        onclick="closeLightbox(event)">
 
     <div class="relative max-w-5xl w-full mx-6" onclick="event.stopPropagation()">
 
       <!-- Top bar -->
       <div class="flex items-center justify-between mb-3 px-1">
-        <p id="lightboxCaption" class="text-white/80 text-sm truncate max-w-lg"></p>
+        <div class="flex items-center gap-2 max-w-lg min-w-0">
+          <p id="lightboxCaption" class="text-white/80 text-sm truncate"></p>
+          <button id="editDescBtn" onclick="startEditDescription()"
+                  class="flex-shrink-0 w-7 h-7 rounded-full bg-white/10 border border-white/20 text-white/60 text-xs hover:bg-white/20 transition flex items-center justify-center"
+                  title="Edit description">&#9998;</button>
+          <div id="editDescForm" class="hidden flex items-center gap-2 flex-1 min-w-0">
+            <input id="editDescInput" type="text" maxlength="2000"
+                   class="flex-1 min-w-0 rounded-full bg-white/10 border border-white/30 text-white text-sm px-3 py-1 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+            <button onclick="saveDescription()"
+                    class="px-3 py-1 rounded-full bg-orange-500/80 text-white text-xs font-medium hover:bg-orange-500 transition">Save</button>
+            <button onclick="cancelEditDescription()"
+                    class="px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 transition">Cancel</button>
+          </div>
+        </div>
         <div class="flex items-center gap-3">
           <!-- Delete button -->
           <button id="lightboxDelete"
@@ -201,14 +216,28 @@
 
     let currentPhotoId = null;
 
+    // ── Search debounce ──────────────────────────────────────
+    let _searchTimer = null;
+    document.getElementById("searchInput").addEventListener("input", () => {
+      clearTimeout(_searchTimer);
+      _searchTimer = setTimeout(loadGallery, 300);
+    });
+
     // ── Gallery ──────────────────────────────────────────────
     async function loadGallery() {
       const sortBy = document.getElementById("sortBy").value;
       const sortOrder = document.getElementById("sortOrder").value;
+      const query = document.getElementById("searchInput").value.trim();
 
       let data;
       try {
-        const res = await fetch(`/api/profile?sort_by=${sortBy}&order=${sortOrder}`);
+        let url;
+        if (query) {
+          url = `/api/photos/search?q=${encodeURIComponent(query)}&sort_by=${sortBy}&order=${sortOrder}`;
+        } else {
+          url = `/api/profile?sort_by=${sortBy}&order=${sortOrder}`;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`Server error (${res.status})`);
         data = await res.json();
       } catch (e) {
@@ -277,6 +306,9 @@
       cap.textContent = caption;
       lb.classList.remove("hidden");
       document.body.style.overflow = "hidden";
+
+      // Reset edit form
+      cancelEditDescription();
 
       // Reset metadata panel
       document.getElementById("lightboxMeta").classList.add("hidden");
@@ -351,7 +383,12 @@
 
       const loc = [meta.loc_description, meta.loc_city, meta.loc_state, meta.loc_country].filter(Boolean).join(", ");
       set("metaLocation", "Location", loc || null);
-      set("metaDimensions", "Size", meta.width && meta.height ? `${meta.width}×${meta.height}${meta.file_size_mb ? " (" + meta.file_size_mb.toFixed(1) + " MB)" : ""}` : null);
+      const sizeStr = meta.file_size_mb
+        ? (meta.file_size_mb < 0.1
+            ? `${Math.round(meta.file_size_mb * 1024)} KB`
+            : `${meta.file_size_mb.toFixed(1)} MB`)
+        : "";
+      set("metaDimensions", "Size", meta.width && meta.height ? `${meta.width}×${meta.height}${sizeStr ? " (" + sizeStr + ")" : ""}` : null);
       set("metaTakenAt", "Taken", meta.taken_at || null);
     }
 
@@ -443,6 +480,63 @@
 
     document.getElementById("sortBy").addEventListener("change", loadGallery);
     document.getElementById("sortOrder").addEventListener("change", loadGallery);
+
+    // ── Editable description ─────────────────────────────────
+    function startEditDescription() {
+      const caption = document.getElementById("lightboxCaption");
+      const form = document.getElementById("editDescForm");
+      const input = document.getElementById("editDescInput");
+      const btn = document.getElementById("editDescBtn");
+      input.value = caption.textContent || "";
+      caption.classList.add("hidden");
+      btn.classList.add("hidden");
+      form.classList.remove("hidden");
+      input.focus();
+    }
+
+    function cancelEditDescription() {
+      document.getElementById("editDescForm").classList.add("hidden");
+      document.getElementById("lightboxCaption").classList.remove("hidden");
+      document.getElementById("editDescBtn").classList.remove("hidden");
+    }
+
+    async function saveDescription() {
+      const input = document.getElementById("editDescInput");
+      const description = input.value.trim();
+      if (!currentPhotoId) return;
+      try {
+        const res = await fetch("/api/photos/description", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
+          body: JSON.stringify({ photo_id: currentPhotoId, description }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          showNotice({ title: "Save Failed", message: err.error || "Could not save description." });
+          return;
+        }
+        const data = await res.json();
+        // Update lightbox caption
+        const caption = document.getElementById("lightboxCaption");
+        caption.textContent = data.description || "";
+        cancelEditDescription();
+        // Update gallery card caption
+        const card = document.querySelector(`[data-photo-id="${currentPhotoId}"]`);
+        if (card) {
+          card.dataset.caption = data.description || card.dataset.caption;
+          const cardCaption = card.querySelector(".absolute.bottom-0");
+          if (cardCaption) cardCaption.textContent = data.description || card.dataset.caption;
+        }
+      } catch (e) {
+        showNotice({ title: "Request Failed", message: "Something went wrong." });
+      }
+    }
+
+    // Allow Enter to save description
+    document.getElementById("editDescInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveDescription(); }
+      if (e.key === "Escape") { e.preventDefault(); cancelEditDescription(); }
+    });
 
     loadGallery();
   </script>
