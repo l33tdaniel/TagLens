@@ -355,16 +355,25 @@ def extract_metadata_from_image(
     *,
     file_size_mb: Optional[float] = None,
 ) -> MetadataResult:
+    from concurrent.futures import ThreadPoolExecutor
+
     exif = _extract_exif(img)
     lat = exif.get("lat")
     lon = exif.get("lon")
-    loc_description = loc_city = loc_state = loc_country = None
-    if lat is not None and lon is not None:
-        loc_description, loc_city, loc_state, loc_country = _reverse_geocode(lat, lon)
 
-    faces = _extract_faces(img)
-    ocr_text = _extract_ocr(img)
-    caption = _extract_caption(img)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        face_fut = pool.submit(_extract_faces, img)
+        ocr_fut = pool.submit(_extract_ocr, img)
+        caption_fut = pool.submit(_extract_caption, img)
+        geo_fut = pool.submit(_reverse_geocode, lat, lon) if lat is not None and lon is not None else None
+
+        faces = face_fut.result()
+        ocr_text = ocr_fut.result()
+        caption = caption_fut.result()
+        if geo_fut:
+            loc_description, loc_city, loc_state, loc_country = geo_fut.result()
+        else:
+            loc_description = loc_city = loc_state = loc_country = None
 
     width, height = img.size if hasattr(img, "size") else (None, None)
 
@@ -445,6 +454,29 @@ def metadata_to_dict(result: MetadataResult) -> Dict[str, Any]:
         "file_size_mb": result.file_size_mb,
         "taken_at": result.taken_at,
     }
+
+
+def warmup() -> None:
+    """Pre-initialize heavy models so the first request doesn't pay cold-start cost."""
+    _get_easyocr_reader()
+    _get_face_cascade()
+    # Ping Ollama to verify reachability
+    try:
+        req = urllib_request.Request(
+            f"{_ollama_endpoint()}/api/tags",
+            method="GET",
+        )
+        with urllib_request.urlopen(req, timeout=5):
+            pass
+    except Exception:
+        pass
+
+
+def cleanup() -> None:
+    """Release model memory."""
+    global _easyocr_reader, _face_cascade
+    _easyocr_reader = None
+    _face_cascade = None
 
 
 if __name__ == "__main__":

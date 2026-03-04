@@ -106,6 +106,11 @@ class Database:
             await self._conn.execute("PRAGMA journal_mode = WAL;")
         return self._conn
 
+    async def close(self) -> None:
+        if self._conn is not None:
+            await self._conn.close()
+            self._conn = None
+
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
         """Return the persistent connection as a context manager."""
@@ -668,6 +673,16 @@ class Database:
             await conn.execute(
                 "UPDATE sessions SET revoked_at = ? WHERE id = ?",
                 (revoked_at, session_id),
+            )
+            await conn.commit()
+
+    async def update_image_description(
+        self, image_id: int, user_id: int, description: str
+    ) -> None:
+        async with self._connection() as conn:
+            await conn.execute(
+                "UPDATE images SET ai_description = ? WHERE id = ? AND user_id = ?",
+                (description, image_id, user_id),
             )
             await conn.commit()
 

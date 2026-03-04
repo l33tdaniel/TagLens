@@ -122,11 +122,31 @@
         </div>
       </div>
 
-      <!-- Image -->
-      <img id="lightboxImg"
-           src=""
-           alt=""
-           class="w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl" />
+      <!-- Image with face overlay -->
+      <div class="relative inline-block w-full">
+        <img id="lightboxImg"
+             src=""
+             alt=""
+             class="w-full max-h-[70vh] object-contain rounded-2xl shadow-2xl" />
+        <svg id="faceOverlay" class="face-overlay" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+
+      <!-- Metadata panel -->
+      <div id="lightboxMeta" class="lightbox-meta hidden">
+        <div id="metaCaption" class="col-span-2 text-white/90 text-sm italic"></div>
+        <div id="metaFaces" class="meta-item"></div>
+        <div id="metaOcr" class="meta-item"></div>
+        <div id="metaCamera" class="meta-item"></div>
+        <div id="metaLocation" class="meta-item"></div>
+        <div id="metaDimensions" class="meta-item"></div>
+        <div id="metaTakenAt" class="meta-item"></div>
+      </div>
+
+      <!-- Toggle face boxes -->
+      <button id="toggleFaces" onclick="toggleFaceOverlay()"
+              class="absolute top-14 right-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 transition hidden">
+        Toggle Faces
+      </button>
 
     </div>
   </div>
@@ -240,7 +260,14 @@
     }
 
     // ── Lightbox ─────────────────────────────────────────────
-    function openLightbox(photoId, src, caption) {
+    let _currentMeta = null;
+    let _facesVisible = true;
+
+    function _clearSvg(svg) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    }
+
+    async function openLightbox(photoId, src, caption) {
       currentPhotoId = photoId;
       const lb = document.getElementById("lightbox");
       const img = document.getElementById("lightboxImg");
@@ -250,23 +277,98 @@
       cap.textContent = caption;
       lb.classList.remove("hidden");
       document.body.style.overflow = "hidden";
+
+      // Reset metadata panel
+      document.getElementById("lightboxMeta").classList.add("hidden");
+      _clearSvg(document.getElementById("faceOverlay"));
+      document.getElementById("toggleFaces").classList.add("hidden");
+      _currentMeta = null;
+
+      // Fetch metadata
+      try {
+        const res = await fetch(`/api/photos/metadata?photo_id=${photoId}`);
+        if (res.ok) {
+          _currentMeta = await res.json();
+          _renderMetadata(_currentMeta);
+          img.addEventListener("load", _onLightboxImageLoad, { once: true });
+          if (img.complete) _onLightboxImageLoad();
+        }
+      } catch (e) { /* metadata is optional */ }
+    }
+
+    function _onLightboxImageLoad() {
+      if (_currentMeta && _currentMeta.faces && _currentMeta.faces.length > 0) {
+        _drawFaces(_currentMeta.faces, _currentMeta.width, _currentMeta.height);
+        document.getElementById("toggleFaces").classList.remove("hidden");
+      }
+    }
+
+    function _drawFaces(faces, natW, natH) {
+      const svg = document.getElementById("faceOverlay");
+      if (!natW || !natH) return;
+
+      svg.setAttribute("viewBox", `0 0 ${natW} ${natH}`);
+      _clearSvg(svg);
+
+      for (const f of faces) {
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", f.x);
+        rect.setAttribute("y", f.y);
+        rect.setAttribute("width", f.w);
+        rect.setAttribute("height", f.h);
+        rect.setAttribute("class", "face-box");
+        svg.appendChild(rect);
+      }
+      svg.style.display = _facesVisible ? "" : "none";
+    }
+
+    function toggleFaceOverlay() {
+      _facesVisible = !_facesVisible;
+      document.getElementById("faceOverlay").style.display = _facesVisible ? "" : "none";
+    }
+
+    function _renderMetadata(meta) {
+      const panel = document.getElementById("lightboxMeta");
+      panel.classList.remove("hidden");
+
+      const set = (id, label, val) => {
+        const el = document.getElementById(id);
+        el.textContent = val ? `${label}: ${val}` : "";
+      };
+
+      document.getElementById("metaCaption").textContent = meta.caption || "";
+      set("metaFaces", "Faces detected", meta.faces ? meta.faces.length : 0);
+      set("metaOcr", "OCR text", meta.ocr_text || null);
+
+      const cam = [meta.make, meta.model].filter(Boolean).join(" ");
+      const camDetails = [
+        meta.f_stop ? `f/${meta.f_stop}` : null,
+        meta.shutter_speed,
+        meta.iso ? `ISO ${meta.iso}` : null,
+        meta.focal_length ? `${meta.focal_length}mm` : null,
+      ].filter(Boolean).join("  ");
+      set("metaCamera", "Camera", cam ? `${cam}${camDetails ? " — " + camDetails : ""}` : null);
+
+      const loc = [meta.loc_description, meta.loc_city, meta.loc_state, meta.loc_country].filter(Boolean).join(", ");
+      set("metaLocation", "Location", loc || null);
+      set("metaDimensions", "Size", meta.width && meta.height ? `${meta.width}×${meta.height}${meta.file_size_mb ? " (" + meta.file_size_mb.toFixed(1) + " MB)" : ""}` : null);
+      set("metaTakenAt", "Taken", meta.taken_at || null);
     }
 
     function closeLightbox(event) {
       if (event && event.target !== document.getElementById("lightbox")) return;
       document.getElementById("lightbox").classList.add("hidden");
       document.getElementById("lightboxImg").src = "";
+      _clearSvg(document.getElementById("faceOverlay"));
+      document.getElementById("lightboxMeta").classList.add("hidden");
       document.body.style.overflow = "";
       currentPhotoId = null;
+      _currentMeta = null;
     }
 
-    // Close lightbox with Escape key
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
-        document.getElementById("lightbox").classList.add("hidden");
-        document.getElementById("lightboxImg").src = "";
-        document.body.style.overflow = "";
-        currentPhotoId = null;
+        closeLightbox();
         closeDeleteModal();
         closeNoticeModal();
       }

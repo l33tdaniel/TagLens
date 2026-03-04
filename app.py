@@ -51,12 +51,16 @@ try:  # Optional metadata pipeline (best-effort).
         metadata_to_dict,
         dependency_report,
         missing_dependencies,
+        warmup as metadata_warmup,
+        cleanup as metadata_cleanup,
     )
 except Exception:  # pragma: no cover - optional dependency
     extract_metadata_from_bytes = None
     metadata_to_dict = None
     dependency_report = None
     missing_dependencies = None
+    metadata_warmup = None
+    metadata_cleanup = None
 
 # Author: Daniel Neugent
 
@@ -140,9 +144,25 @@ async def _ensure_database() -> None:
                 logger.warning("metadata deps missing: %s", ", ".join(missing))
             else:
                 logger.info("metadata deps satisfied")
+        if metadata_warmup is not None:
+            logger.info("warming up metadata models in background...")
+            asyncio.get_event_loop().run_in_executor(None, metadata_warmup)
+
+
+async def _shutdown_cleanup() -> None:
+    """Release resources on server shutdown."""
+    logger.info("shutdown: cleaning up resources...")
+    if metadata_cleanup is not None:
+        metadata_cleanup()
+    try:
+        await db.close()
+    except Exception:
+        pass
+    logger.info("shutdown: cleanup complete")
 
 
 app.startup_handler(_ensure_database)
+app.shutdown_handler(_shutdown_cleanup)
 app.serve_directory(
     route="/static",
     directory_path=str(static_dir),
@@ -365,14 +385,6 @@ def _json_response(payload: dict, *, status: int = 200) -> Response:
     )
 
 
-def _ollama_endpoint() -> str:
-    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-
-
-def _ollama_model() -> str:
-    return os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
-
-
 def _metadata_enabled() -> bool:
     raw = os.getenv("TAGLENS_METADATA_ENABLED", "1").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -510,41 +522,6 @@ def _photo_view_response(user_id: int, photo_id: int, record) -> Response:
     )
 
 
-def _generate_image_description_with_ollama(
-    image_bytes: bytes,
-    *,
-    filename: str,
-) -> str:
-    endpoint = f"{_ollama_endpoint()}/api/generate"
-    payload = {
-        "model": _ollama_model(),
-        "prompt": (
-            "You are describing a user photo for search and organization. "
-            "Write 1-2 concise sentences with the key visible subjects, setting, and notable details."
-        ),
-        "stream": False,
-        "images": [base64.b64encode(image_bytes).decode("utf-8")],
-    }
-    req = urllib_request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib_request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            parsed = json.loads(raw) if raw else {}
-    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    description = (parsed.get("response") or "").strip()
-    if not description:
-        return ""
-    return f"{description}"
-
-
 async def _process_image_metadata(
     *,
     image_id: int,
@@ -605,6 +582,10 @@ async def _process_image_metadata(
             taken_at=data.get("taken_at"),
         )
         logger.info("metadata stored image_id=%s filename=%s", image_id, filename)
+        caption = str(data.get("caption") or "")
+        if caption:
+            await db.update_image_description(image_id, user_id, caption)
+            logger.info("ai_description updated image_id=%s", image_id)
     except Exception:
         logger.exception(
             "metadata store failed image_id=%s filename=%s",
@@ -862,23 +843,7 @@ async def upload_photo_api(request: Request) -> Response:
             exc_info=True,
         )
     try:
-        # 1. Generate caption
-        description = await asyncio.to_thread(
-            _generate_image_description_with_ollama,
-            image_bytes,
-            filename=filename,
-        )
-    except Exception:
-        logger.exception(
-            "upload caption generation failed user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-        )
-        return _json_response({"error": "upload failed unexpectedly"}, status=500)
-
-    try:
-        # 2. Insert metadata first to get photo_id.
-        # Keep blob data only when B2 is unavailable.
+        # Insert metadata first to get photo_id. Caption populates async via background task.
         image_blob = image_bytes if bucket is None else None
         thumbnail_blob = thumbnail_data if bucket is None else None
         saved = await db.create_image_metadata(
@@ -886,7 +851,7 @@ async def upload_photo_api(request: Request) -> Response:
             faces_json="[]",
             ocr_text="",
             user_id=auth.user.id,
-            ai_description=description,
+            ai_description="",
             content_type=content_type,
             image_data=image_blob,
             thumbnail_data=thumbnail_blob,
