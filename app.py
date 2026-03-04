@@ -60,8 +60,13 @@ except Exception:  # pragma: no cover - optional dependency
 
 # Author: Daniel Neugent
 
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s:%(name)s:%(message)s")
+for _noisy in ("httpx", "easyocr", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 app = Robyn(__file__)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 current_file_path = pathlib.Path(__file__).parent.resolve()
 static_dir = current_file_path / "frontend" / "static"
@@ -365,7 +370,7 @@ def _ollama_endpoint() -> str:
 
 
 def _ollama_model() -> str:
-    return os.getenv("OLLAMA_MODEL", "llava")
+    return os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
 
 
 def _metadata_enabled() -> bool:

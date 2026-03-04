@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
 import sys
 import threading
 from dataclasses import dataclass
+from urllib import error as urllib_error, request as urllib_request
 import importlib.util
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -28,7 +30,6 @@ _OPTIONAL_DEP_SPECS = {
     "numpy": "numpy",
     "easyocr": "easyocr",
     "torch": "torch",
-    "transformers": "transformers",
     "geopy": "geopy",
     "pillow-heif": "pillow_heif",
 }
@@ -70,9 +71,6 @@ class MetadataResult:
     taken_at: Optional[str]
 
 
-_model_lock = threading.Lock()
-_caption_model = None
-
 _reader_lock = threading.Lock()
 _easyocr_reader = None
 
@@ -100,30 +98,12 @@ def _torch_device() -> str:
     return "cpu"
 
 
-def _get_caption_model():
-    global _caption_model
-    if _caption_model is not None:
-        return _caption_model
-    if not _torch_available():
-        return None
-    try:
-        from transformers import AutoModelForCausalLM
-        import torch
-    except Exception:
-        return None
-    with _model_lock:
-        if _caption_model is not None:
-            return _caption_model
-        try:
-            _caption_model = AutoModelForCausalLM.from_pretrained(
-                "vikhyatk/moondream2",
-                trust_remote_code=True,
-                dtype=torch.bfloat16,
-                device_map=_torch_device(),
-            )
-        except Exception:
-            _caption_model = None
-    return _caption_model
+def _ollama_endpoint() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def _ollama_model() -> str:
+    return os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
 
 
 def _get_easyocr_reader():
@@ -295,16 +275,38 @@ def _extract_ocr(img: "Image.Image") -> str:
 
 
 def _extract_caption(img: "Image.Image") -> str:
-    model = _get_caption_model()
-    if model is None:
-        return ""
+    buf = io.BytesIO()
     try:
-        output = model.caption(img, length="short")
+        rgb = img.convert("RGB") if img.mode != "RGB" else img
+        rgb.save(buf, format="JPEG")
     except Exception:
         return ""
-    if isinstance(output, dict):
-        return str(output.get("caption", "")).strip()
-    return str(output or "").strip()
+    img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    endpoint = f"{_ollama_endpoint()}/api/generate"
+    payload = {
+        "model": _ollama_model(),
+        "prompt": (
+            "You are describing a photo for search and organization. "
+            "Write 1-2 concise sentences with the key visible subjects, setting, and notable details."
+        ),
+        "stream": False,
+        "images": [img_b64],
+    }
+    req = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw) if raw else {}
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    return (parsed.get("response") or "").strip()
 
 
 def _extract_exif(img: "Image.Image") -> Dict[str, Any]:

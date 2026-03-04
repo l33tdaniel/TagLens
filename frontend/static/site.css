@@ -101,6 +101,50 @@ body {
   }
 }
 
+/* Success modal */
+.success-modal-content {
+  animation: modalIn 0.3s ease-out;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.success-checkmark {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+}
+
+.success-checkmark circle {
+  fill: none;
+  stroke: var(--creamsicle-primary);
+  stroke-width: 2;
+  stroke-dasharray: 170;
+  stroke-dashoffset: 170;
+  animation: circleIn 0.5s ease-out 0.1s forwards;
+}
+
+.success-checkmark polyline {
+  fill: none;
+  stroke: var(--creamsicle-primary);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 50;
+  stroke-dashoffset: 50;
+  animation: checkIn 0.35s ease-out 0.45s forwards;
+}
+
+@keyframes circleIn {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes checkIn {
+  to { stroke-dashoffset: 0; }
+}
+
 @media (max-width: 640px) {
   .app-nav a {
     padding-left: 1rem;

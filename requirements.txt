@@ -1,3 +1,4 @@
+# Core app
 robyn>=0.9
 uvicorn[standard]>=0.23
 passlib[bcrypt]>=1.7
@@ -7,3 +8,24 @@ aiosqlite>=0.20
 markupsafe>=2.1
 Jinja2>=3.1
 Pillow>=10.0
+b2sdk>=2.10
+
+# Metadata pipeline (optional but supported)
+numpy>=1.24
+opencv-python>=4.8
+easyocr>=1.7
+torch>=2.2
+pillow-heif>=0.18
+geopy>=2.4
+
+# Optional scripts / experimentation
+sentence-transformers>=2.2
+sqlite-vec>=0.1.6
+
+# Dev / test tools
+black>=24.1
+ruff>=0.0.306
+types-passlib>=1.7
+mypy>=1.9
+pytest>=7.4
+pytest-asyncio>=0.23

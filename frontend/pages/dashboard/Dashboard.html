@@ -145,6 +145,25 @@
     </div>
   </div>
 
+  <!-- Success Modal -->
+  <div id="successModal"
+       class="hidden fixed inset-0 flex items-center justify-center bg-black/50 px-6"
+       style="z-index: 70;"
+       onclick="closeSuccessModal(event)">
+    <div class="success-modal-content w-full max-w-sm rounded-2xl border border-orange-200 bg-white p-8 shadow-2xl text-center" onclick="event.stopPropagation()">
+      <svg class="success-checkmark" viewBox="0 0 64 64">
+        <circle cx="32" cy="32" r="28"/>
+        <polyline points="20 34 28 42 44 24"/>
+      </svg>
+      <h3 id="successTitle" class="mt-5 text-xl font-semibold text-gray-900"></h3>
+      <p id="successMessage" class="mt-2 text-sm text-gray-500"></p>
+      <button onclick="closeSuccessModal()"
+              class="mt-6 w-full rounded-full bg-creamsicle-primary py-2.5 text-sm font-medium text-white transition hover:opacity-90">
+        Done
+      </button>
+    </div>
+  </div>
+
   <!-- Dropzone Script -->
    <script src="/static/dropzone.min.js"></script>
 
@@ -176,8 +195,27 @@ function closeNoticeModal(event) {
   document.getElementById("noticeModal").classList.add("hidden");
 }
 
+function showSuccess({ title = "Success", message = "", count = 0 } = {}) {
+  document.getElementById("successTitle").textContent = title;
+  const msg = count > 0
+    ? `${count} photo${count === 1 ? "" : "s"} uploaded successfully`
+    : message;
+  document.getElementById("successMessage").textContent = msg;
+  const modal = document.getElementById("successModal");
+  modal.classList.remove("hidden");
+  // Re-trigger animation by cloning the SVG
+  const svg = modal.querySelector(".success-checkmark");
+  const clone = svg.cloneNode(true);
+  svg.parentNode.replaceChild(clone, svg);
+}
+
+function closeSuccessModal(event) {
+  if (event && event.target !== document.getElementById("successModal")) return;
+  document.getElementById("successModal").classList.add("hidden");
+}
+
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeNoticeModal();
+  if (event.key === "Escape") { closeNoticeModal(); closeSuccessModal(); }
 });
 
 function setUploadState(uploading) {
@@ -252,9 +290,9 @@ uploadBtn.addEventListener("click", async () => {
       await uploadSingleFile(file);
     }
     myDropzone.removeAllFiles(true);
-    showNotice({
+    showSuccess({
       title: "Upload Complete",
-      message: "Your selected files were uploaded successfully.",
+      count: files.length,
     });
   } catch (error) {
     console.error("Upload operation stopped due to error", error);

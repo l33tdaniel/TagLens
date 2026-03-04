@@ -8,6 +8,7 @@ This repository contains a Robyn-based web app for user authentication, profile 
 - CSRF protection for form-based auth actions.
 - Protected routes (`/dashboard`, `/profile`, `/api/*`) and public routes (`/`, `/register`, `/login`).
 - Photo metadata APIs with optional AI description generation.
+ - Optional background metadata extraction (faces/OCR/caption/GPS) with best-effort dependencies.
 
 ## Features
 - `robyn` runs the asynchronous web server.
@@ -23,17 +24,12 @@ This repository contains a Robyn-based web app for user authentication, profile 
 ## Setup
 1. (Optional but recommended) create a virtual environment:
    ```bash
-   python -m venv .venv
+   uv venv .venv
    source .venv/bin/activate
    ```
-2. Install core app dependencies:
+2. Install all dependencies (core + metadata + dev) from the single consolidated file:
    ```bash
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt -r requirements-dev.txt
-   ```
-3. Install media/metadata extras (currently required for app startup because `app.py` imports `scripts/metadata.py` at import time):
-   ```bash
-   python -m pip install -r arnav_requirements.txt
+   uv pip install -r requirements.txt
    ```
 4. Set environment variables for Backblaze B2 (required by current startup path):
    ```bash
@@ -71,7 +67,7 @@ This repository contains a Robyn-based web app for user authentication, profile 
 - The SQLite file lives under `data/users.db`; it is ignored by `.gitignore`.
 - Configure Ollama integration with:
   - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-  - `OLLAMA_MODEL` (default `llava`)
+  - `OLLAMA_MODEL` (default `qwen3.5:4b`)
 - To reset the database, stop the server and delete `data/users.db` before restarting.
 - You can toggle secure cookies by setting `ROBYN_SECURE_COOKIES=1` in the environment (remember to run behind HTTPS when secure cookies are enabled).
 
@@ -99,24 +95,21 @@ BUCKET_NAME=your_bucket_name
 
 Or run each check directly:
 ```bash
-source .venv/bin/activate
-python -m compileall app.py auth.py database.py scripts tests
-python -m black --check .
-python -m ruff check .
-python -m mypy app.py auth.py database.py
-python -m pytest -q
+uv run python -m compileall app.py auth.py database.py scripts tests
+uv run python -m black --check .
+uv run python -m ruff check .
+uv run python -m mypy app.py auth.py database.py
+uv run python -m pytest -q
 ```
 
 ## Running tests
 - Fast unit-style tests only:
   ```bash
-  source .venv/bin/activate
-  python -m pytest -q tests/test_auth.py tests/test_database.py
+  uv run python -m pytest -q tests/test_auth.py tests/test_database.py
   ```
 - Integration tests:
   ```bash
-  source .venv/bin/activate
-  python -m pytest -q tests/test_app_integration.py
+  uv run python -m pytest -q tests/test_app_integration.py
   ```
 
 ## Current quality snapshot (2026-02-28)
@@ -153,9 +146,14 @@ From a fresh run in this repo:
 - `ROBYN_SECURE_COOKIES` (`1` for HTTPS deployments)
 - `TAGLENS_DB_PATH` (optional sqlite file override)
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default `llava`)
+- `OLLAMA_MODEL` (default `qwen3.5:4b`)
 - `KEY_ID`, `APP_KEY`, `BUCKET_NAME` (Backblaze B2)
+- `TAGLENS_METADATA_ENABLED` (`1`/`true` to enable background metadata extraction; default `1`)
+
+## Metadata dependencies
+- `GET /api/metadata/deps` returns a JSON report of optional metadata dependencies and what is missing.
 
 ## Notes
 - `./start_server.sh` supports `DEV_MODE=1` to pass `--dev` to Robyn.
 - The local SQLite database is stored under `data/` by default.
+- `requirements-dev.txt` and `arnav_requirements.txt` are now superseded by the consolidated `requirements.txt`.
