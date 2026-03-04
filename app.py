@@ -1032,6 +1032,80 @@ async def download_photo_api(request: Request) -> Response:
     )
 
 
+def _metadata_response_dict(record) -> dict:
+    try:
+        faces = json.loads(record.faces_json or "[]")
+    except json.JSONDecodeError:
+        faces = []
+    return {
+        "image_id": record.image_id,
+        "faces": faces,
+        "ocr_text": record.ocr_text,
+        "caption": record.caption,
+        "lat": record.lat,
+        "lon": record.lon,
+        "loc_description": record.loc_description,
+        "loc_city": record.loc_city,
+        "loc_state": record.loc_state,
+        "loc_country": record.loc_country,
+        "make": record.make,
+        "model": record.model,
+        "iso": record.iso,
+        "f_stop": record.f_stop,
+        "shutter_speed": record.shutter_speed,
+        "focal_length": record.focal_length,
+        "width": record.width,
+        "height": record.height,
+        "file_size_mb": record.file_size_mb,
+        "taken_at": record.taken_at,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
+
+
+@app.post("/api/photos/recaption")
+async def recaption_photo_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, TypeError):
+        return _json_response({"error": "invalid JSON body"}, status=400)
+
+    photo_id = body.get("photo_id")
+    if not isinstance(photo_id, int):
+        return _json_response({"error": "photo_id (int) required"}, status=400)
+
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+
+    image_bytes = record.image_data
+    if not image_bytes:
+        image_bytes = await asyncio.to_thread(
+            _fetch_bucket_image_bytes, auth.user.id, photo_id, record.filename
+        )
+    if not image_bytes:
+        return _json_response({"error": "image data unavailable"}, status=404)
+
+    await _process_image_metadata(
+        image_id=photo_id,
+        user_id=auth.user.id,
+        filename=record.filename,
+        image_bytes=image_bytes,
+    )
+
+    meta = await db.fetch_image_metadata_for_user(photo_id, auth.user.id)
+    if not meta:
+        return _json_response({"error": "metadata generation failed"}, status=500)
+
+    return _json_response({"ok": True, "metadata": _metadata_response_dict(meta)})
+
+
 @app.get("/api/photos/metadata")
 async def photo_metadata_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1047,37 +1121,7 @@ async def photo_metadata_api(request: Request) -> Response:
     if not record:
         return _json_response({"error": "metadata not found"}, status=404)
 
-    try:
-        faces = json.loads(record.faces_json or "[]")
-    except json.JSONDecodeError:
-        faces = []
-
-    return _json_response(
-        {
-            "image_id": record.image_id,
-            "faces": faces,
-            "ocr_text": record.ocr_text,
-            "caption": record.caption,
-            "lat": record.lat,
-            "lon": record.lon,
-            "loc_description": record.loc_description,
-            "loc_city": record.loc_city,
-            "loc_state": record.loc_state,
-            "loc_country": record.loc_country,
-            "make": record.make,
-            "model": record.model,
-            "iso": record.iso,
-            "f_stop": record.f_stop,
-            "shutter_speed": record.shutter_speed,
-            "focal_length": record.focal_length,
-            "width": record.width,
-            "height": record.height,
-            "file_size_mb": record.file_size_mb,
-            "taken_at": record.taken_at,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }
-    )
+    return _json_response(_metadata_response_dict(record))
 
 
 @app.get("/api/metadata/deps")

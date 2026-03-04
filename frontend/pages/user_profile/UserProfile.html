@@ -90,7 +90,7 @@
        class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm overflow-y-auto"
        onclick="closeLightbox(event)">
 
-    <div class="relative max-w-5xl w-full mx-6" onclick="event.stopPropagation()">
+    <div class="relative max-w-5xl w-full mx-6 py-8" onclick="event.stopPropagation()">
 
       <!-- Top bar -->
       <div class="flex items-center justify-between mb-3 px-1">
@@ -108,19 +108,37 @@
                     class="px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 transition">Cancel</button>
           </div>
         </div>
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <!-- Toggle Faces button -->
+          <button id="toggleFaces" onclick="toggleFaceOverlay()"
+                  class="hidden flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-white/10 border border-white/20
+                         text-white/70 text-sm font-medium
+                         hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" stroke-width="2"/><path stroke-width="2" d="M4 20c0-4 4-7 8-7s8 3 8 7"/></svg>
+            Faces
+          </button>
+          <!-- Re-analyze button -->
+          <button id="recaptionBtn" onclick="recaptionPhoto()"
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-white/10 border border-white/20
+                         text-white/70 text-sm font-medium
+                         hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M5.6 15.3A8 8 0 0 0 20 12M18.4 8.7A8 8 0 0 0 4 12"/></svg>
+            <span class="recaption-label">Re-analyze</span>
+          </button>
           <!-- Delete button -->
           <button id="lightboxDelete"
                   onclick="deleteCurrentPhoto()"
-                  class="flex items-center gap-1.5 px-4 py-1.5 rounded-full 
-                         bg-red-500/20 border border-red-400/40 
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-red-500/20 border border-red-400/40
                          text-red-300 text-sm font-medium
                          hover:bg-red-500/40 transition">
             🗑 Delete
           </button>
           <!-- Close button -->
           <button onclick="closeLightbox()"
-                  class="flex items-center justify-center w-8 h-8 rounded-full 
+                  class="flex items-center justify-center w-8 h-8 rounded-full
                          bg-white/10 border border-white/20 text-white
                          hover:bg-white/20 transition text-lg leading-none">
             ✕
@@ -133,7 +151,7 @@
         <img id="lightboxImg"
              src=""
              alt=""
-             class="w-full max-h-[70vh] object-contain rounded-2xl shadow-2xl" />
+             class="w-full max-h-[55vh] object-contain rounded-2xl shadow-2xl" />
         <svg id="faceOverlay" class="face-overlay" preserveAspectRatio="xMidYMid meet"></svg>
       </div>
 
@@ -147,12 +165,6 @@
         <div id="metaDimensions" class="meta-item"></div>
         <div id="metaTakenAt" class="meta-item"></div>
       </div>
-
-      <!-- Toggle face boxes -->
-      <button id="toggleFaces" onclick="toggleFaceOverlay()"
-              class="absolute top-14 right-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 transition hidden">
-        Toggle Faces
-      </button>
 
     </div>
   </div>
@@ -241,7 +253,6 @@
       document.getElementById("photosCount").textContent = data.photos.length;
 
       for (const photo of data.photos) {
-        const fullSrc = `/api/photos/view?photo_id=${photo.id}`;
         const thumbSrc = `/api/photos/thumb?photo_id=${photo.id}`;
         const caption = photo.description || photo.filename;
 
@@ -249,7 +260,7 @@
         card.className = "relative group rounded-xl overflow-hidden cursor-pointer";
         card.dataset.photoId = photo.id;
         card.dataset.caption = caption;
-        card.dataset.src = fullSrc;
+        card.dataset.src = thumbSrc;
 
         const img = document.createElement("img");
         img.src = thumbSrc;
@@ -274,7 +285,7 @@
         deleteBtn.addEventListener("click", (e) => { e.stopPropagation(); promptDelete(photo.id); });
         card.appendChild(deleteBtn);
 
-        card.addEventListener("click", () => openLightbox(photo.id, fullSrc, caption));
+        card.addEventListener("click", () => openLightbox(photo.id, thumbSrc, caption));
         grid.appendChild(card);
       }
     }
@@ -322,7 +333,12 @@
     function _onLightboxImageLoad() {
       if (_currentMeta && _currentMeta.faces && _currentMeta.faces.length > 0) {
         _drawFaces(_currentMeta.faces, _currentMeta.width, _currentMeta.height);
-        document.getElementById("toggleFaces").classList.remove("hidden");
+        const btn = document.getElementById("toggleFaces");
+        btn.classList.remove("hidden");
+        if (_facesVisible) {
+          btn.classList.add("bg-white/25", "border-white/50", "text-white");
+          btn.classList.remove("bg-white/10", "border-white/20", "text-white/70");
+        }
       }
     }
 
@@ -348,6 +364,62 @@
     function toggleFaceOverlay() {
       _facesVisible = !_facesVisible;
       document.getElementById("faceOverlay").style.display = _facesVisible ? "" : "none";
+      const btn = document.getElementById("toggleFaces");
+      if (_facesVisible) {
+        btn.classList.add("bg-white/25", "border-white/50", "text-white");
+        btn.classList.remove("bg-white/10", "border-white/20", "text-white/70");
+      } else {
+        btn.classList.remove("bg-white/25", "border-white/50", "text-white");
+        btn.classList.add("bg-white/10", "border-white/20", "text-white/70");
+      }
+    }
+
+    async function recaptionPhoto() {
+      if (!currentPhotoId) return;
+      const btn = document.getElementById("recaptionBtn");
+      btn.disabled = true;
+      btn.classList.add("opacity-50", "pointer-events-none");
+      const label = btn.querySelector(".recaption-label");
+      label.textContent = "Analyzing…";
+
+      try {
+        const res = await fetch("/api/photos/recaption", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          body: JSON.stringify({ photo_id: currentPhotoId }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Re-analyze failed");
+
+        const meta = data.metadata;
+        _currentMeta = meta;
+        _renderMetadata(meta);
+
+        const caption = meta.caption || "";
+        document.getElementById("lightboxCaption").textContent = caption;
+
+        const card = document.querySelector(`[data-photo-id="${currentPhotoId}"]`);
+        if (card) {
+          card.dataset.caption = caption;
+          const overlay = card.querySelector(".photo-caption");
+          if (overlay) overlay.textContent = caption;
+        }
+
+        _clearSvg(document.getElementById("faceOverlay"));
+        const facesBtn = document.getElementById("toggleFaces");
+        if (meta.faces && meta.faces.length > 0) {
+          _drawFaces(meta.faces, meta.width, meta.height);
+          facesBtn.classList.remove("hidden");
+        } else {
+          facesBtn.classList.add("hidden");
+        }
+      } catch (e) {
+        showNotice({ title: "Re-analyze Failed", message: e.message });
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove("opacity-50", "pointer-events-none");
+        label.textContent = "Re-analyze";
+      }
     }
 
     function _renderMetadata(meta) {
