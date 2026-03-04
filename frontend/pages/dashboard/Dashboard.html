@@ -111,12 +111,6 @@
 
         </form>
 
-        <button
-          id="uploadBtn"
-          class="mt-8 bg-creamsicle-primary text-white px-8 py-3 rounded-xl shadow hover:opacity-90 transition flex items-center justify-center gap-2 min-w-56">
-          <span id="uploadSpinner" class="upload-spinner hidden" aria-hidden="true"></span>
-          <span id="uploadBtnText">Upload Selected Files</span>
-        </button>
 
       </div>
     </div>
@@ -179,9 +173,6 @@ const myDropzone = new Dropzone("#photoDropzone", {
   acceptedFiles: "image/*",
 });
 
-const uploadBtn = document.getElementById("uploadBtn");
-const uploadBtnText = document.getElementById("uploadBtnText");
-const uploadSpinner = document.getElementById("uploadSpinner");
 let isUploading = false;
 
 function showNotice({ title = "Notice", message = "Something happened." } = {}) {
@@ -217,15 +208,6 @@ function closeSuccessModal(event) {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") { closeNoticeModal(); closeSuccessModal(); }
 });
-
-function setUploadState(uploading) {
-  isUploading = uploading;
-  uploadBtn.disabled = uploading;
-  uploadBtn.classList.toggle("opacity-60", uploading);
-  uploadBtn.classList.toggle("cursor-not-allowed", uploading);
-  uploadSpinner.classList.toggle("hidden", !uploading);
-  uploadBtnText.textContent = uploading ? "Uploading..." : "Upload Selected Files";
-}
 
 function getCsrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)taglens_csrf=([^;]*)/);
@@ -274,35 +256,36 @@ async function uploadSingleFile(file) {
   return body;
 }
 
-uploadBtn.addEventListener("click", async () => {
-  if (isUploading) return;
-  const files = myDropzone.getAcceptedFiles();
-  if (!files.length) {
-    showNotice({
-      title: "No Files Selected",
-      message: "Please choose at least one file to upload.",
-    });
-    return;
-  }
-  setUploadState(true);
-  try {
-    for (const file of files) {
+let _uploadQueue = [];
+let _processing = false;
+
+async function _processQueue() {
+  if (_processing) return;
+  _processing = true;
+  let uploaded = 0;
+  while (_uploadQueue.length > 0) {
+    const file = _uploadQueue.shift();
+    try {
       await uploadSingleFile(file);
+      uploaded++;
+    } catch (error) {
+      console.error("Upload failed", error);
+      showNotice({
+        title: "Upload Failed",
+        message: error instanceof Error ? error.message : "Upload failed.",
+      });
     }
-    myDropzone.removeAllFiles(true);
-    showSuccess({
-      title: "Upload Complete",
-      count: files.length,
-    });
-  } catch (error) {
-    console.error("Upload operation stopped due to error", error);
-    showNotice({
-      title: "Upload Failed",
-      message: error instanceof Error ? error.message : "Upload failed.",
-    });
-  } finally {
-    setUploadState(false);
   }
+  _processing = false;
+  if (uploaded > 0) {
+    myDropzone.removeAllFiles(true);
+    showSuccess({ title: "Upload Complete", count: uploaded });
+  }
+}
+
+myDropzone.on("addedfile", (file) => {
+  _uploadQueue.push(file);
+  _processQueue();
 });
 </script>
 </body>
