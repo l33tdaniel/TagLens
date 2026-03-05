@@ -1,3 +1,13 @@
+"""
+Pytest fixtures and lightweight HTTP client for integration tests.
+
+Purpose:
+    Spins up a Robyn server for tests and exposes a small client wrapper.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -87,6 +97,7 @@ class ServerInfo:
 
 
 def _find_free_port() -> int:
+    """Pick an ephemeral localhost port for the test server."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.bind(("127.0.0.1", 0))
@@ -98,6 +109,7 @@ def _find_free_port() -> int:
 
 
 def _wait_for_server(base_url: str, proc: subprocess.Popen[str]) -> None:
+    """Poll the root endpoint until the server is ready or times out."""
     deadline = time.time() + 10
     last_error: Exception | None = None
     while time.time() < deadline:
@@ -115,6 +127,7 @@ def _wait_for_server(base_url: str, proc: subprocess.Popen[str]) -> None:
 
 @pytest.fixture(scope="module")
 def server(tmp_path_factory: pytest.TempPathFactory) -> ServerInfo:
+    """Start a Robyn process and yield connection details for tests."""
     if shutil.which("robyn") is None:
         pytest.skip("Robyn CLI is not available in this environment.")
     repo_root = Path(__file__).resolve().parents[1]

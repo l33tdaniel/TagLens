@@ -1,3 +1,6 @@
+/* Purpose: Tailwind entrypoint for generating utility classes.
+ * Authorship (git history, mapped to real names): Daniel (l33tdaniel)
+ */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

@@ -1,4 +1,8 @@
 <!DOCTYPE html>
+<!--
+  Purpose: authenticated dashboard with upload dropzone and notices.
+  Authorship (git history, mapped to real names): Daniel (l33tdaniel), Srihari (dimes130)
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -31,16 +35,6 @@
 
   <!-- CENTER: Navigation -->
   <nav class="app-nav flex items-center gap-4">
-
-    <a href="/"
-      class="h-11 px-6 rounded-full
-             border border-orange-200
-             bg-white/50
-             flex items-center
-             text-sm font-medium
-             hover:bg-orange-50 transition">
-      Home
-    </a>
 
     <a href="/dashboard"
       class="h-11 px-6 rounded-full
@@ -91,7 +85,7 @@
           Upload Photos
         </h2>
         <p class="text-gray-500 mb-8">
-          HEIC and PNG only
+          JPEG, PNG, HEIC, and other image formats
         </p>
 
         <form
@@ -111,12 +105,6 @@
 
         </form>
 
-        <button
-          id="uploadBtn"
-          class="mt-8 bg-creamsicle-primary text-white px-8 py-3 rounded-xl shadow hover:opacity-90 transition flex items-center justify-center gap-2 min-w-56">
-          <span id="uploadSpinner" class="upload-spinner hidden" aria-hidden="true"></span>
-          <span id="uploadBtnText">Upload Selected Files</span>
-        </button>
 
       </div>
     </div>
@@ -145,6 +133,25 @@
     </div>
   </div>
 
+  <!-- Success Modal -->
+  <div id="successModal"
+       class="hidden fixed inset-0 flex items-center justify-center bg-black/50 px-6"
+       style="z-index: 70;"
+       onclick="closeSuccessModal(event)">
+    <div class="success-modal-content w-full max-w-sm rounded-2xl border border-orange-200 bg-white p-8 shadow-2xl text-center" onclick="event.stopPropagation()">
+      <svg class="success-checkmark" viewBox="0 0 64 64">
+        <circle cx="32" cy="32" r="28"/>
+        <polyline points="20 34 28 42 44 24"/>
+      </svg>
+      <h3 id="successTitle" class="mt-5 text-xl font-semibold text-gray-900"></h3>
+      <p id="successMessage" class="mt-2 text-sm text-gray-500"></p>
+      <button onclick="closeSuccessModal()"
+              class="mt-6 w-full rounded-full bg-creamsicle-primary py-2.5 text-sm font-medium text-white transition hover:opacity-90">
+        Done
+      </button>
+    </div>
+  </div>
+
   <!-- Dropzone Script -->
    <script src="/static/dropzone.min.js"></script>
 
@@ -160,9 +167,6 @@ const myDropzone = new Dropzone("#photoDropzone", {
   acceptedFiles: "image/*",
 });
 
-const uploadBtn = document.getElementById("uploadBtn");
-const uploadBtnText = document.getElementById("uploadBtnText");
-const uploadSpinner = document.getElementById("uploadSpinner");
 let isUploading = false;
 
 function showNotice({ title = "Notice", message = "Something happened." } = {}) {
@@ -176,18 +180,28 @@ function closeNoticeModal(event) {
   document.getElementById("noticeModal").classList.add("hidden");
 }
 
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeNoticeModal();
-});
-
-function setUploadState(uploading) {
-  isUploading = uploading;
-  uploadBtn.disabled = uploading;
-  uploadBtn.classList.toggle("opacity-60", uploading);
-  uploadBtn.classList.toggle("cursor-not-allowed", uploading);
-  uploadSpinner.classList.toggle("hidden", !uploading);
-  uploadBtnText.textContent = uploading ? "Uploading..." : "Upload Selected Files";
+function showSuccess({ title = "Success", message = "", count = 0 } = {}) {
+  document.getElementById("successTitle").textContent = title;
+  const msg = count > 0
+    ? `${count} photo${count === 1 ? "" : "s"} uploaded successfully`
+    : message;
+  document.getElementById("successMessage").textContent = msg;
+  const modal = document.getElementById("successModal");
+  modal.classList.remove("hidden");
+  // Re-trigger animation by cloning the SVG
+  const svg = modal.querySelector(".success-checkmark");
+  const clone = svg.cloneNode(true);
+  svg.parentNode.replaceChild(clone, svg);
 }
+
+function closeSuccessModal(event) {
+  if (event && event.target !== document.getElementById("successModal")) return;
+  document.getElementById("successModal").classList.add("hidden");
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeNoticeModal(); closeSuccessModal(); }
+});
 
 function getCsrfToken() {
   const match = document.cookie.match(/(?:^|;\s*)taglens_csrf=([^;]*)/);
@@ -236,35 +250,36 @@ async function uploadSingleFile(file) {
   return body;
 }
 
-uploadBtn.addEventListener("click", async () => {
-  if (isUploading) return;
-  const files = myDropzone.getAcceptedFiles();
-  if (!files.length) {
-    showNotice({
-      title: "No Files Selected",
-      message: "Please choose at least one file to upload.",
-    });
-    return;
-  }
-  setUploadState(true);
-  try {
-    for (const file of files) {
+let _uploadQueue = [];
+let _processing = false;
+
+async function _processQueue() {
+  if (_processing) return;
+  _processing = true;
+  let uploaded = 0;
+  while (_uploadQueue.length > 0) {
+    const file = _uploadQueue.shift();
+    try {
       await uploadSingleFile(file);
+      uploaded++;
+    } catch (error) {
+      console.error("Upload failed", error);
+      showNotice({
+        title: "Upload Failed",
+        message: error instanceof Error ? error.message : "Upload failed.",
+      });
     }
-    myDropzone.removeAllFiles(true);
-    showNotice({
-      title: "Upload Complete",
-      message: "Your selected files were uploaded successfully.",
-    });
-  } catch (error) {
-    console.error("Upload operation stopped due to error", error);
-    showNotice({
-      title: "Upload Failed",
-      message: error instanceof Error ? error.message : "Upload failed.",
-    });
-  } finally {
-    setUploadState(false);
   }
+  _processing = false;
+  if (uploaded > 0) {
+    myDropzone.removeAllFiles(true);
+    showSuccess({ title: "Upload Complete", count: uploaded });
+  }
+}
+
+myDropzone.on("addedfile", (file) => {
+  _uploadQueue.push(file);
+  _processQueue();
 });
 </script>
 </body>

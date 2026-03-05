@@ -1,3 +1,13 @@
+"""
+Metadata extraction pipeline for images and videos.
+
+Purpose:
+    Provides face detection, OCR, EXIF, and caption helpers for local scripts.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Srihari (dimes130), Arnav (arnav-jain1), Chloe (n518t893)
+"""
+
 import os
 from typing import Dict, List
 import sys

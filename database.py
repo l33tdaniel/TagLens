@@ -1,3 +1,13 @@
+"""
+SQLite persistence layer for TagLens.
+
+Purpose:
+    Defines DB schema, record dataclasses, and async helpers for CRUD access.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Chloe (n518t893)
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -8,8 +18,6 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional, Sequence
 
 import aiosqlite
-
-# Author: Daniel Neugent
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "users.db"
 
@@ -82,6 +90,7 @@ class Database:
         """Open a connection with foreign-key support enabled."""
         async with aiosqlite.connect(self.db_path) as conn:
             conn.row_factory = aiosqlite.Row
+            # Enforce relational integrity at the SQLite layer.
             await conn.execute("PRAGMA foreign_keys = ON;")
             yield conn
 
@@ -112,6 +121,7 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
                 """)
+            # Images are stored in a single table; blob columns are optional.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,3 +1,7 @@
+<!--
+Purpose: high-level overview, setup, and operational notes for TagLens.
+Authorship (git history, mapped to real names): Daniel (l33tdaniel), Arnav (arnav-jain1), Chloe (n518t893)
+-->
 # TagLens Authentication Service
 
 This repository contains a Robyn-based web app for user authentication, profile pages, and photo metadata storage.

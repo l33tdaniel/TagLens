@@ -1,3 +1,4 @@
-# Legacy compatibility requirements file.
+# Purpose: legacy compatibility requirements file.
+# Authorship (git history, mapped to real names): Srihari (dimes130), Arnav (arnav-jain1), Chloe (n518t893)
 # Keep this as a thin alias so older setup docs/scripts still work.
 -r requirements.txt

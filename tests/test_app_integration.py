@@ -1,3 +1,13 @@
+"""
+Integration coverage for auth/session flows in the live Robyn app.
+
+Purpose:
+    Exercises CSRF handling, login/logout, session revocation, and redirects.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -12,6 +22,7 @@ from tests.conftest import ServerInfo, TestClient
 
 
 def _extract_csrf_token(html: str) -> str:
+    """Find the CSRF hidden input within rendered HTML."""
     match = re.search(r'name="csrf_token" value="([^"]+)"', html)
     assert match, "CSRF token input not found in HTML."
     return match.group(1)
@@ -26,6 +37,7 @@ def _csrf_headers(client: TestClient) -> dict[str, str]:
 def _register_user(
     client: TestClient, username: str, email: str, password: str
 ) -> None:
+    """Helper for registering a fresh user via the HTML form."""
     register_page = client.request("GET", "/register")
     csrf_token = _extract_csrf_token(register_page.body)
     response = client.request(
@@ -43,6 +55,7 @@ def _register_user(
 
 
 def _login_user(client: TestClient, email: str, password: str) -> None:
+    """Helper for logging in via the HTML form."""
     login_page = client.request("GET", "/login")
     csrf_token = _extract_csrf_token(login_page.body)
     response = client.request(

@@ -1,4 +1,8 @@
 <!DOCTYPE html>
+<!--
+  Purpose: authenticated profile page with gallery and lightbox UX.
+  Authorship (git history, mapped to real names): Daniel (l33tdaniel), Srihari (dimes130)
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -17,14 +21,6 @@
 
 <body class="bg-creamsicle-bg min-h-screen flex flex-col">
 
-  <!-- Sidebar -->
-  <div class="profile-sidebar">
-    <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">📤</button>
-    <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">🖼️</button>
-    <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">🏷️</button>
-    <button class="w-12 h-12 rounded-full border border-orange-200 bg-white/60 backdrop-blur flex items-center justify-center hover:scale-105 transition">⚙️</button>
-  </div>
-
   <!-- Navbar -->
   <header class="app-header px-10 py-6">
     <div class="brand-group flex items-center gap-4">
@@ -33,7 +29,6 @@
     </div>
 
     <nav class="app-nav flex items-center gap-4">
-      <a href="/" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Home</a>
       <a href="/dashboard" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Dashboard</a>
       <a href="/profile" class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">Profile</a>
     </nav>
@@ -44,7 +39,7 @@
     </div>
   </header>
 
-  <main class="profile-main flex-grow pl-32 pr-12 pt-20 pb-32">
+  <main class="profile-main flex-grow px-12 pt-20 pb-32">
 
     <!-- Profile Card -->
     <div class="max-w-6xl mx-auto mb-20">
@@ -75,6 +70,8 @@
       <div class="mb-6 flex flex-wrap items-center justify-between gap-4">
         <h3 class="text-2xl font-semibold text-gray-900">Your Gallery</h3>
         <div class="flex items-center gap-3">
+          <input id="searchInput" type="text" placeholder="Search photos..."
+                 class="rounded-full border border-orange-300 bg-white/80 px-4 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-orange-200" />
           <label for="sortBy" class="text-sm text-gray-600">Sort by</label>
           <select id="sortBy" class="rounded-full border border-orange-300 bg-white/80 px-3 py-2 text-sm">
             <option value="uploaded">Date Uploaded</option>
@@ -94,27 +91,58 @@
 
   <!-- Lightbox -->
   <div id="lightbox"
-       class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
+       class="hidden fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-sm"
        onclick="closeLightbox(event)">
 
-    <div class="relative max-w-5xl w-full mx-6" onclick="event.stopPropagation()">
+    <div class="relative max-w-5xl w-full mx-auto my-8 px-6" onclick="event.stopPropagation()">
 
       <!-- Top bar -->
       <div class="flex items-center justify-between mb-3 px-1">
-        <p id="lightboxCaption" class="text-white/80 text-sm truncate max-w-lg"></p>
-        <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 max-w-lg min-w-0">
+          <p id="lightboxCaption" class="text-white/80 text-sm truncate"></p>
+          <button id="editDescBtn" onclick="startEditDescription()"
+                  class="flex-shrink-0 w-7 h-7 rounded-full bg-white/10 border border-white/20 text-white/60 text-xs hover:bg-white/20 transition flex items-center justify-center"
+                  title="Edit description">&#9998;</button>
+          <div id="editDescForm" class="hidden flex items-center gap-2 flex-1 min-w-0">
+            <input id="editDescInput" type="text" maxlength="2000"
+                   class="flex-1 min-w-0 rounded-full bg-white/10 border border-white/30 text-white text-sm px-3 py-1 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+            <button onclick="saveDescription()"
+                    class="px-3 py-1 rounded-full bg-orange-500/80 text-white text-xs font-medium hover:bg-orange-500 transition">Save</button>
+            <button onclick="cancelEditDescription()"
+                    class="px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 transition">Cancel</button>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <!-- Toggle Faces button -->
+          <button id="toggleFaces" onclick="toggleFaceOverlay()"
+                  class="hidden flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-white/10 border border-white/20
+                         text-white/70 text-sm font-medium
+                         hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" stroke-width="2"/><path stroke-width="2" d="M4 20c0-4 4-7 8-7s8 3 8 7"/></svg>
+            Faces
+          </button>
+          <!-- Re-analyze button -->
+          <button id="recaptionBtn" onclick="recaptionPhoto()"
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-white/10 border border-white/20
+                         text-white/70 text-sm font-medium
+                         hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h5M20 20v-5h-5M5.6 15.3A8 8 0 0 0 20 12M18.4 8.7A8 8 0 0 0 4 12"/></svg>
+            <span class="recaption-label">Re-analyze</span>
+          </button>
           <!-- Delete button -->
           <button id="lightboxDelete"
                   onclick="deleteCurrentPhoto()"
-                  class="flex items-center gap-1.5 px-4 py-1.5 rounded-full 
-                         bg-red-500/20 border border-red-400/40 
+                  class="flex items-center gap-1.5 px-3 py-1.5 rounded-full
+                         bg-red-500/20 border border-red-400/40
                          text-red-300 text-sm font-medium
                          hover:bg-red-500/40 transition">
             🗑 Delete
           </button>
           <!-- Close button -->
           <button onclick="closeLightbox()"
-                  class="flex items-center justify-center w-8 h-8 rounded-full 
+                  class="flex items-center justify-center w-8 h-8 rounded-full
                          bg-white/10 border border-white/20 text-white
                          hover:bg-white/20 transition text-lg leading-none">
             ✕
@@ -122,11 +150,25 @@
         </div>
       </div>
 
-      <!-- Image -->
-      <img id="lightboxImg"
-           src=""
-           alt=""
-           class="w-full max-h-[80vh] object-contain rounded-2xl shadow-2xl" />
+      <!-- Image with face overlay -->
+      <div class="relative inline-block w-full">
+        <img id="lightboxImg"
+             src=""
+             alt=""
+             class="w-full max-h-[55vh] object-contain rounded-2xl shadow-2xl" />
+        <svg id="faceOverlay" class="face-overlay" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+
+      <!-- Metadata panel -->
+      <div id="lightboxMeta" class="lightbox-meta hidden">
+        <div id="metaCaption" class="col-span-2 text-white/90 text-sm italic"></div>
+        <div id="metaFaces" class="meta-item"></div>
+        <div id="metaOcr" class="meta-item"></div>
+        <div id="metaCamera" class="meta-item"></div>
+        <div id="metaLocation" class="meta-item"></div>
+        <div id="metaDimensions" class="meta-item"></div>
+        <div id="metaTakenAt" class="meta-item"></div>
+      </div>
 
     </div>
   </div>
@@ -181,14 +223,28 @@
 
     let currentPhotoId = null;
 
+    // ── Search debounce ──────────────────────────────────────
+    let _searchTimer = null;
+    document.getElementById("searchInput").addEventListener("input", () => {
+      clearTimeout(_searchTimer);
+      _searchTimer = setTimeout(loadGallery, 300);
+    });
+
     // ── Gallery ──────────────────────────────────────────────
     async function loadGallery() {
       const sortBy = document.getElementById("sortBy").value;
       const sortOrder = document.getElementById("sortOrder").value;
+      const query = document.getElementById("searchInput").value.trim();
 
       let data;
       try {
-        const res = await fetch(`/api/profile?sort_by=${sortBy}&order=${sortOrder}`);
+        let url;
+        if (query) {
+          url = `/api/photos/search?q=${encodeURIComponent(query)}&sort_by=${sortBy}&order=${sortOrder}`;
+        } else {
+          url = `/api/profile?sort_by=${sortBy}&order=${sortOrder}`;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`Server error (${res.status})`);
         data = await res.json();
       } catch (e) {
@@ -201,7 +257,6 @@
       document.getElementById("photosCount").textContent = data.photos.length;
 
       for (const photo of data.photos) {
-        const fullSrc = `/api/photos/view?photo_id=${photo.id}`;
         const thumbSrc = `/api/photos/thumb?photo_id=${photo.id}`;
         const caption = photo.description || photo.filename;
 
@@ -209,7 +264,7 @@
         card.className = "relative group rounded-xl overflow-hidden cursor-pointer";
         card.dataset.photoId = photo.id;
         card.dataset.caption = caption;
-        card.dataset.src = fullSrc;
+        card.dataset.src = thumbSrc;
 
         const img = document.createElement("img");
         img.src = thumbSrc;
@@ -234,13 +289,20 @@
         deleteBtn.addEventListener("click", (e) => { e.stopPropagation(); promptDelete(photo.id); });
         card.appendChild(deleteBtn);
 
-        card.addEventListener("click", () => openLightbox(photo.id, fullSrc, caption));
+        card.addEventListener("click", () => openLightbox(photo.id, thumbSrc, caption));
         grid.appendChild(card);
       }
     }
 
     // ── Lightbox ─────────────────────────────────────────────
-    function openLightbox(photoId, src, caption) {
+    let _currentMeta = null;
+    let _facesVisible = true;
+
+    function _clearSvg(svg) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    }
+
+    async function openLightbox(photoId, src, caption) {
       currentPhotoId = photoId;
       const lb = document.getElementById("lightbox");
       const img = document.getElementById("lightboxImg");
@@ -250,23 +312,167 @@
       cap.textContent = caption;
       lb.classList.remove("hidden");
       document.body.style.overflow = "hidden";
+
+      // Reset edit form
+      cancelEditDescription();
+
+      // Reset metadata panel
+      document.getElementById("lightboxMeta").classList.add("hidden");
+      _clearSvg(document.getElementById("faceOverlay"));
+      document.getElementById("toggleFaces").classList.add("hidden");
+      _currentMeta = null;
+
+      // Fetch metadata
+      try {
+        const res = await fetch(`/api/photos/metadata?photo_id=${photoId}`);
+        if (res.ok) {
+          _currentMeta = await res.json();
+          _renderMetadata(_currentMeta);
+          img.addEventListener("load", _onLightboxImageLoad, { once: true });
+          if (img.complete) _onLightboxImageLoad();
+        }
+      } catch (e) { /* metadata is optional */ }
+    }
+
+    function _onLightboxImageLoad() {
+      if (_currentMeta && _currentMeta.faces && _currentMeta.faces.length > 0) {
+        _drawFaces(_currentMeta.faces, _currentMeta.width, _currentMeta.height);
+        const btn = document.getElementById("toggleFaces");
+        btn.classList.remove("hidden");
+        if (_facesVisible) {
+          btn.classList.add("bg-white/25", "border-white/50", "text-white");
+          btn.classList.remove("bg-white/10", "border-white/20", "text-white/70");
+        }
+      }
+    }
+
+    function _drawFaces(faces, natW, natH) {
+      const svg = document.getElementById("faceOverlay");
+      if (!natW || !natH) return;
+
+      svg.setAttribute("viewBox", `0 0 ${natW} ${natH}`);
+      _clearSvg(svg);
+
+      for (const f of faces) {
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+        rect.setAttribute("x", f.x);
+        rect.setAttribute("y", f.y);
+        rect.setAttribute("width", f.w);
+        rect.setAttribute("height", f.h);
+        rect.setAttribute("class", "face-box");
+        svg.appendChild(rect);
+      }
+      svg.style.display = _facesVisible ? "" : "none";
+    }
+
+    function toggleFaceOverlay() {
+      _facesVisible = !_facesVisible;
+      document.getElementById("faceOverlay").style.display = _facesVisible ? "" : "none";
+      const btn = document.getElementById("toggleFaces");
+      if (_facesVisible) {
+        btn.classList.add("bg-white/25", "border-white/50", "text-white");
+        btn.classList.remove("bg-white/10", "border-white/20", "text-white/70");
+      } else {
+        btn.classList.remove("bg-white/25", "border-white/50", "text-white");
+        btn.classList.add("bg-white/10", "border-white/20", "text-white/70");
+      }
+    }
+
+    async function recaptionPhoto() {
+      if (!currentPhotoId) return;
+      const btn = document.getElementById("recaptionBtn");
+      btn.disabled = true;
+      btn.classList.add("opacity-50", "pointer-events-none");
+      const label = btn.querySelector(".recaption-label");
+      label.textContent = "Analyzing…";
+
+      try {
+        const res = await fetch("/api/photos/recaption", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          body: JSON.stringify({ photo_id: currentPhotoId }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Re-analyze failed");
+
+        const meta = data.metadata;
+        _currentMeta = meta;
+        _renderMetadata(meta);
+
+        const caption = meta.caption || "";
+        document.getElementById("lightboxCaption").textContent = caption;
+
+        const card = document.querySelector(`[data-photo-id="${currentPhotoId}"]`);
+        if (card) {
+          card.dataset.caption = caption;
+          const overlay = card.querySelector(".photo-caption");
+          if (overlay) overlay.textContent = caption;
+        }
+
+        _clearSvg(document.getElementById("faceOverlay"));
+        const facesBtn = document.getElementById("toggleFaces");
+        if (meta.faces && meta.faces.length > 0) {
+          _drawFaces(meta.faces, meta.width, meta.height);
+          facesBtn.classList.remove("hidden");
+        } else {
+          facesBtn.classList.add("hidden");
+        }
+      } catch (e) {
+        showNotice({ title: "Re-analyze Failed", message: e.message });
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove("opacity-50", "pointer-events-none");
+        label.textContent = "Re-analyze";
+      }
+    }
+
+    function _renderMetadata(meta) {
+      const panel = document.getElementById("lightboxMeta");
+      panel.classList.remove("hidden");
+
+      const set = (id, label, val) => {
+        const el = document.getElementById(id);
+        el.textContent = val ? `${label}: ${val}` : "";
+      };
+
+      document.getElementById("metaCaption").textContent = meta.caption || "";
+      set("metaFaces", "Faces detected", meta.faces ? meta.faces.length : 0);
+      set("metaOcr", "OCR text", meta.ocr_text || null);
+
+      const cam = [meta.make, meta.model].filter(Boolean).join(" ");
+      const camDetails = [
+        meta.f_stop ? `f/${meta.f_stop}` : null,
+        meta.shutter_speed,
+        meta.iso ? `ISO ${meta.iso}` : null,
+        meta.focal_length ? `${meta.focal_length}mm` : null,
+      ].filter(Boolean).join("  ");
+      set("metaCamera", "Camera", cam ? `${cam}${camDetails ? " — " + camDetails : ""}` : null);
+
+      const loc = [meta.loc_description, meta.loc_city, meta.loc_state, meta.loc_country].filter(Boolean).join(", ");
+      set("metaLocation", "Location", loc || null);
+      const sizeStr = meta.file_size_mb
+        ? (meta.file_size_mb < 0.1
+            ? `${Math.round(meta.file_size_mb * 1024)} KB`
+            : `${meta.file_size_mb.toFixed(1)} MB`)
+        : "";
+      set("metaDimensions", "Size", meta.width && meta.height ? `${meta.width}×${meta.height}${sizeStr ? " (" + sizeStr + ")" : ""}` : null);
+      set("metaTakenAt", "Taken", meta.taken_at || null);
     }
 
     function closeLightbox(event) {
       if (event && event.target !== document.getElementById("lightbox")) return;
       document.getElementById("lightbox").classList.add("hidden");
       document.getElementById("lightboxImg").src = "";
+      _clearSvg(document.getElementById("faceOverlay"));
+      document.getElementById("lightboxMeta").classList.add("hidden");
       document.body.style.overflow = "";
       currentPhotoId = null;
+      _currentMeta = null;
     }
 
-    // Close lightbox with Escape key
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
-        document.getElementById("lightbox").classList.add("hidden");
-        document.getElementById("lightboxImg").src = "";
-        document.body.style.overflow = "";
-        currentPhotoId = null;
+        closeLightbox();
         closeDeleteModal();
         closeNoticeModal();
       }
@@ -341,6 +547,63 @@
 
     document.getElementById("sortBy").addEventListener("change", loadGallery);
     document.getElementById("sortOrder").addEventListener("change", loadGallery);
+
+    // ── Editable description ─────────────────────────────────
+    function startEditDescription() {
+      const caption = document.getElementById("lightboxCaption");
+      const form = document.getElementById("editDescForm");
+      const input = document.getElementById("editDescInput");
+      const btn = document.getElementById("editDescBtn");
+      input.value = caption.textContent || "";
+      caption.classList.add("hidden");
+      btn.classList.add("hidden");
+      form.classList.remove("hidden");
+      input.focus();
+    }
+
+    function cancelEditDescription() {
+      document.getElementById("editDescForm").classList.add("hidden");
+      document.getElementById("lightboxCaption").classList.remove("hidden");
+      document.getElementById("editDescBtn").classList.remove("hidden");
+    }
+
+    async function saveDescription() {
+      const input = document.getElementById("editDescInput");
+      const description = input.value.trim();
+      if (!currentPhotoId) return;
+      try {
+        const res = await fetch("/api/photos/description", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
+          body: JSON.stringify({ photo_id: currentPhotoId, description }),
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          showNotice({ title: "Save Failed", message: err.error || "Could not save description." });
+          return;
+        }
+        const data = await res.json();
+        // Update lightbox caption
+        const caption = document.getElementById("lightboxCaption");
+        caption.textContent = data.description || "";
+        cancelEditDescription();
+        // Update gallery card caption
+        const card = document.querySelector(`[data-photo-id="${currentPhotoId}"]`);
+        if (card) {
+          card.dataset.caption = data.description || card.dataset.caption;
+          const cardCaption = card.querySelector(".absolute.bottom-0");
+          if (cardCaption) cardCaption.textContent = data.description || card.dataset.caption;
+        }
+      } catch (e) {
+        showNotice({ title: "Request Failed", message: "Something went wrong." });
+      }
+    }
+
+    // Allow Enter to save description
+    document.getElementById("editDescInput").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveDescription(); }
+      if (e.key === "Escape") { e.preventDefault(); cancelEditDescription(); }
+    });
 
     loadGallery();
   </script>

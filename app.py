@@ -1,3 +1,14 @@
+"""
+TagLens web app entrypoint.
+
+Purpose:
+    Defines the Robyn application, HTTP routes, and shared runtime services
+    (DB connection, rate limits, metadata pipeline, and Backblaze integration).
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Srihari (dimes130)
+"""
+
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Tuple
@@ -51,8 +62,6 @@ from scripts.insightface_tagging import (
 from scripts.upload_metadata import extract_upload_metadata
 import aiosqlite
 
-# Author: Daniel Neugent
-
 app = Robyn(__file__)
 logger = logging.getLogger(__name__)
 
@@ -82,14 +91,17 @@ class RateLimiter:
             return True
 
 
-# Per-route limiters
+# Per-route limiters: tuned to keep basic abuse in check without penalizing
+# normal users during bursts of activity.
 _login_limiter = RateLimiter(max_requests=10, window_seconds=60)
 _register_limiter = RateLimiter(max_requests=5, window_seconds=60)
 _upload_limiter = RateLimiter(max_requests=30, window_seconds=60)
 
-# Singletons used by every request
+# Singletons used by every request to avoid repeated setup overhead.
 db = Database()
 
+# Backblaze B2 credentials (optional). When missing, the app will operate
+# purely on the local sqlite DB without remote storage.
 KEY_ID = os.getenv("KEY_ID")
 APP_KEY = os.getenv("APP_KEY") or os.getenv("API_KEY")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
@@ -175,6 +187,7 @@ def _form_data(request: Request) -> dict[str, str]:
 
 
 def _raw_body_bytes(request: Request) -> bytes:
+    """Normalize Robyn request body into bytes."""
     raw_body = request.body
     if isinstance(raw_body, (bytes, bytearray)):
         return bytes(raw_body)
@@ -186,6 +199,7 @@ def _raw_body_bytes(request: Request) -> bytes:
 
 
 def _json_data(request: Request) -> dict:
+    """Parse JSON body into a dict; return empty dict on failure."""
     body = _raw_body_bytes(request)
     if not body:
         return {}
@@ -197,20 +211,24 @@ def _json_data(request: Request) -> dict:
 
 
 def _now_iso() -> str:
+    """UTC timestamp in ISO-8601 format."""
     return _utc_now().isoformat()
 
 
 def _utc_now() -> datetime:
+    """UTC datetime helper used across sessions and metadata."""
     return datetime.now(timezone.utc)
 
 
 def _as_utc(value: datetime) -> datetime:
+    """Coerce naive datetimes to UTC, otherwise convert to UTC."""
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
 
 def _is_expired(expires_at: str) -> bool:
+    """Return True if a stored ISO timestamp is in the past."""
     try:
         return _as_utc(datetime.fromisoformat(expires_at)) <= _utc_now()
     except ValueError:
@@ -218,6 +236,7 @@ def _is_expired(expires_at: str) -> bool:
 
 
 def _get_or_create_csrf_token(request: Request) -> Tuple[str, bool]:
+    """Return CSRF token + whether it needs to be set in a cookie."""
     token = _get_cookie_value(request, CSRF_COOKIE_NAME)
     if token:
         return token, False
@@ -252,6 +271,7 @@ def _allow_rate_limited_request(limiter: RateLimiter, request: Request) -> bool:
 
 
 def _cookie_header(name: str, value: str, settings: dict) -> str:
+    """Build a Set-Cookie header value from common settings."""
     parts = [f"{name}={value}"]
     max_age = settings.get("max_age")
     if max_age is not None:
@@ -274,18 +294,22 @@ def _cookie_header(name: str, value: str, settings: dict) -> str:
 
 
 def _append_set_cookie(response: Response, name: str, value: str, settings: dict) -> None:
+    """Append a Set-Cookie header without clobbering existing cookies."""
     response.headers.append("Set-Cookie", _cookie_header(name, value, settings))
 
 
 def _set_csrf_cookie(response: Response, token: str) -> None:
+    """Set CSRF cookie using standard settings."""
     _append_set_cookie(response, CSRF_COOKIE_NAME, token, csrf_cookie_settings())
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
+    """Set session cookie using standard settings."""
     _append_set_cookie(response, SESSION_COOKIE_NAME, token, cookie_settings())
 
 
 def _clear_session_cookie(response: Response) -> None:
+    """Expire the session cookie immediately."""
     _append_set_cookie(response, SESSION_COOKIE_NAME, "", cookie_clear_settings())
 
 
@@ -296,6 +320,7 @@ def _apply_common_cookies(
     csrf_token: Optional[str] = None,
     set_csrf: bool = False,
 ) -> None:
+    """Apply session/CSRF cookie mutations in a consistent order."""
     if clear_session:
         _clear_session_cookie(response)
     if set_csrf and csrf_token:
@@ -439,6 +464,7 @@ def _redirect(location: str) -> Response:
 
 
 def _json_response(payload: dict, *, status: int = 200) -> Response:
+    """Return a JSON response with a UTF-8 content-type."""
     return Response(
         status_code=status,
         headers={"content-type": "application/json; charset=utf-8"},
@@ -455,6 +481,7 @@ def _ollama_model() -> str:
 
 
 def _normalize_content_type(content_type: str, filename: str) -> str:
+    """Normalize content type; fall back to filename inference."""
     candidate = (content_type or "").strip().lower()
     if candidate.startswith("image/"):
         return candidate
@@ -465,6 +492,7 @@ def _normalize_content_type(content_type: str, filename: str) -> str:
 
 
 def _parse_taken_at(value: object) -> Optional[str]:
+    """Normalize a user-provided timestamp into ISO-8601."""
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -482,6 +510,7 @@ def _generate_thumbnail_webp(
     max_size: tuple[int, int] = (480, 480),
     quality: int = 70,
 ) -> bytes:
+    """Create a WEBP thumbnail from raw image bytes."""
     if Image is None:
         raise RuntimeError("Pillow is required for thumbnail generation")
     try:
@@ -500,11 +529,13 @@ def _generate_thumbnail_webp(
 
 
 def _photo_file_key(user_id: int, photo_id: int, filename: str) -> str:
+    """Return a stable storage key for the original upload."""
     ext = pathlib.Path(filename).suffix.lower()
     return f"{user_id}/{photo_id}{ext}"
 
 
 def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Optional[bytes]:
+    """Fetch original image bytes from Backblaze for a photo."""
     if bucket is None:
         return None
     file_key = _photo_file_key(user_id, photo_id, filename)
@@ -519,6 +550,7 @@ def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Opt
 
 
 def _photo_view_response(user_id: int, photo_id: int, record) -> Response:
+    """Return a response that serves the image or redirects to B2."""
     if record.image_data:
         return Response(
             status_code=200,
@@ -546,6 +578,7 @@ def _generate_image_description_with_ollama(
     *,
     filename: str,
 ) -> str:
+    """Generate a short caption using the local Ollama image model."""
     endpoint = f"{_ollama_endpoint()}/api/generate"
     payload = {
         "model": _ollama_model(),
@@ -753,6 +786,7 @@ async def profile(request: Request) -> Response:
 
 @app.get("/UserProfile.js")
 async def profile_js(_: Request) -> Response:
+    """Placeholder script endpoint (legacy client hook)."""
     content = "console.info('UserProfile.js placeholder loaded.');"
     return Response(
         status_code=200,
@@ -763,6 +797,7 @@ async def profile_js(_: Request) -> Response:
 
 @app.get("/favicon.ico")
 async def favicon(_: Request) -> Response:
+    """Serve the SVG favicon through a conventional .ico route."""
     favicon_path = static_dir / "favicon.svg"
     if not favicon_path.exists():
         return Response(status_code=404, headers={}, description="")
@@ -1000,6 +1035,7 @@ async def upload_photo_api(request: Request) -> Response:
 
 @app.get("/api/photos/download")
 async def download_photo_api(request: Request) -> Response:
+    """Return base64 or signed URL for a stored photo."""
     auth = await _ensure_authenticated(request)
     if isinstance(auth, Response):
         return _json_response({"error": "authentication required"}, status=401)

@@ -1,3 +1,14 @@
+"""
+Authentication helpers for TagLens.
+
+Purpose:
+    Centralizes session token generation, password hashing/verification,
+    and cookie parameterization for login/logout flows.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -9,13 +20,12 @@ from typing import Any, Dict
 
 from passlib.context import CryptContext
 
-# Author: Daniel Neugent
-
 SESSION_COOKIE_NAME = "taglens_session"
 CSRF_COOKIE_NAME = "taglens_csrf"
 DEFAULT_MAX_AGE = 60 * 60 * 24  # 1 day
 
-# Prefer Argon2 for new hashes; allow legacy PBKDF2/bcrypt verification.
+# Prefer Argon2 for new hashes; allow legacy PBKDF2/bcrypt verification so
+# existing users can continue to log in after algorithm upgrades.
 pwd_context = CryptContext(
     schemes=["argon2", "pbkdf2_sha256", "bcrypt"],
     default="argon2",

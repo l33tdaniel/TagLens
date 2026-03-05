@@ -1,3 +1,13 @@
+"""
+Async tests for Database CRUD paths.
+
+Purpose:
+    Confirms user/session lifecycle and image metadata behaviors.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from datetime import datetime, timedelta
 
 import pytest

@@ -1,3 +1,13 @@
+"""
+Unit tests for auth token helpers.
+
+Purpose:
+    Verifies CSRF token comparison and session token hashing behavior.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from auth import (
     generate_csrf_token,
     generate_session_token,

@@ -1,3 +1,6 @@
+/* Purpose: global styles and layout helpers for the TagLens UI.
+ * Authorship (git history, mapped to real names): Daniel (l33tdaniel)
+ */
 :root {
   --creamsicle-bg: #fff7f0;
   --creamsicle-primary: #ff8c42;
@@ -50,17 +53,6 @@ body {
   animation: spin 0.7s linear infinite;
 }
 
-.profile-sidebar {
-  position: fixed;
-  left: 1.5rem;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2rem;
-}
-
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -86,19 +78,87 @@ body {
     max-width: 100%;
   }
 
-  .profile-sidebar {
-    position: static;
-    transform: none;
-    flex-direction: row;
-    justify-content: center;
-    gap: 1rem;
-    padding: 0 1rem;
-    margin-top: 1rem;
-  }
-
   .profile-main {
     padding: 1.25rem 1rem 2.5rem;
   }
+}
+
+/* Success modal */
+.success-modal-content {
+  animation: modalIn 0.3s ease-out;
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.success-checkmark {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto;
+}
+
+.success-checkmark circle {
+  fill: none;
+  stroke: var(--creamsicle-primary);
+  stroke-width: 2;
+  stroke-dasharray: 170;
+  stroke-dashoffset: 170;
+  animation: circleIn 0.5s ease-out 0.1s forwards;
+}
+
+.success-checkmark polyline {
+  fill: none;
+  stroke: var(--creamsicle-primary);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 50;
+  stroke-dashoffset: 50;
+  animation: checkIn 0.35s ease-out 0.45s forwards;
+}
+
+@keyframes circleIn {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes checkIn {
+  to { stroke-dashoffset: 0; }
+}
+
+/* Face overlay */
+.face-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.face-box {
+  fill: none;
+  stroke: #ff8c42;
+  stroke-width: 3;
+  rx: 4;
+  ry: 4;
+}
+
+/* Lightbox metadata panel */
+.lightbox-meta {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.25rem 1rem;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 0.75rem;
+}
+
+.lightbox-meta .meta-item:empty {
+  display: none;
 }
 
 @media (max-width: 640px) {
