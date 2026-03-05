@@ -1,3 +1,5 @@
+# Purpose: extended metadata/ML dependency set used by the Arnav pipeline.
+# Authorship (git history, mapped to real names): Srihari (dimes130), Arnav (arnav-jain1), Chloe (n518t893)
 accelerate==1.12.0
 annotated-types==0.7.0
 anyio==4.12.1

@@ -1,3 +1,5 @@
+// Purpose: Tailwind theme configuration for TagLens UI.
+// Authorship (git history, mapped to real names): Daniel (l33tdaniel)
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   content: [

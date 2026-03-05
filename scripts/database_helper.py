@@ -1,3 +1,14 @@
+"""
+Utility helpers for the legacy photos DB schema + vector search.
+
+Purpose:
+    Creates tables/triggers for the experimental photo metadata schema and
+    stores image/video metadata plus semantic embeddings.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Srihari (dimes130), Arnav (arnav-jain1)
+"""
+
 import sqlite3
 import sqlite_vec
 from sentence_transformers import SentenceTransformer
@@ -8,13 +19,14 @@ embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 def init_db(db_path="data\\photos.db"):
+    """Create the sqlite schema and return a connected handle."""
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
 
     cursor = conn.cursor()
 
-    # Pillar 1: The Master Metadata Table
+    # Pillar 1: master metadata table (one row per file).
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS photos (
         photo_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,10 +56,10 @@ def init_db(db_path="data\\photos.db"):
     WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'photos');
     """)
 
-    # 2. CREATE INDEX for fast user lookups
+    # 2. Create index for fast user lookups.
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_id ON photos(user_id)")
 
-    # Pillar 2: Full-Text Search (Keyword Engine)
+    # Pillar 2: full-text search (keyword engine).
     cursor.execute("""
     CREATE VIRTUAL TABLE IF NOT EXISTS photos_fts USING fts5(
         loc_description,
@@ -62,7 +74,7 @@ def init_db(db_path="data\\photos.db"):
     )
     """)
 
-    # Pillar 3: Vector Search (Semantic Engine)
+    # Pillar 3: vector search (semantic engine).
     cursor.execute("""
     CREATE VIRTUAL TABLE IF NOT EXISTS photos_vec USING vec0(
         photo_id INTEGER PRIMARY KEY,
@@ -71,7 +83,7 @@ def init_db(db_path="data\\photos.db"):
     )
     """)
 
-    # Pillar 4: Dedicated Stats Table (Now with video_count)
+    # Pillar 4: dedicated stats table (tracks photo vs. video counts).
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_stats (
         user_id INTEGER PRIMARY KEY,
@@ -80,7 +92,7 @@ def init_db(db_path="data\\photos.db"):
     )
     """)
 
-    # Trigger: FTS only fires when is_photo is True (1)
+    # Trigger: update FTS only for photos.
     cursor.execute("""
     CREATE TRIGGER IF NOT EXISTS photos_ai AFTER INSERT ON photos 
     WHEN new.is_photo = 1
@@ -90,7 +102,7 @@ def init_db(db_path="data\\photos.db"):
     END;
     """)
 
-    # Trigger: Increment photo count only if it's a photo
+    # Trigger: increment photo count only if it's a photo.
     cursor.execute("""
     CREATE TRIGGER IF NOT EXISTS increment_photo_count 
     AFTER INSERT ON photos 
@@ -102,7 +114,7 @@ def init_db(db_path="data\\photos.db"):
     END;
     """)
 
-    # Trigger: Increment video count only if it's a video
+    # Trigger: increment video count only if it's a video.
     cursor.execute("""
     CREATE TRIGGER IF NOT EXISTS increment_video_count 
     AFTER INSERT ON photos 
@@ -119,9 +131,10 @@ def init_db(db_path="data\\photos.db"):
 
 
 def save_photo_to_db(conn, metadata):
+    """Insert a photo row, upload to B2, and store its embedding."""
     cursor = conn.cursor()
 
-    # 1. Insert into Master Table (is_photo hardcoded to True)
+    # 1. Insert into master table (is_photo hardcoded to True).
     sql = """
     INSERT INTO photos (
         user_id, filepath, is_photo, file_size_mb, width, height, 
@@ -158,10 +171,11 @@ def save_photo_to_db(conn, metadata):
     cursor.execute(sql, values)
     photo_id = cursor.lastrowid
 
+    # Upload original to remote storage keyed by user + DB id.
     ext = metadata["filename"].split(".")[-1]
     upload_to_b2(metadata["filepath"], f"{metadata['user_id']}/{photo_id}.{ext}")
 
-    # 2. Generate and Insert Embedding (Only happens for photos)
+    # 2. Generate and insert embedding (only happens for photos).
     embedding = embed_model.encode(metadata["caption"])
 
     cursor.execute(
@@ -182,9 +196,10 @@ def save_photo_to_db(conn, metadata):
 
 
 def save_video_to_db(conn, metadata):
+    """Insert a video row and update stats (no embedding)."""
     cursor = conn.cursor()
 
-    # 1. Insert Video into Master Table (is_photo hardcoded to False, most fields None)
+    # 1. Insert video into master table (is_photo hardcoded to False).
     sql = """
     INSERT INTO photos (
         user_id, filepath, is_photo, file_size_mb, width, height, 

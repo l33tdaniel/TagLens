@@ -1,3 +1,13 @@
+"""
+Integration coverage for auth/session flows in the live Robyn app.
+
+Purpose:
+    Exercises CSRF handling, login/logout, session revocation, and redirects.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -12,6 +22,7 @@ from tests.conftest import ServerInfo, TestClient
 
 
 def _extract_csrf_token(html: str) -> str:
+    """Find the CSRF hidden input within rendered HTML."""
     match = re.search(r'name="csrf_token" value="([^"]+)"', html)
     assert match, "CSRF token input not found in HTML."
     return match.group(1)
@@ -26,6 +37,7 @@ def _csrf_headers(client: TestClient) -> dict[str, str]:
 def _register_user(
     client: TestClient, username: str, email: str, password: str
 ) -> None:
+    """Helper for registering a fresh user via the HTML form."""
     register_page = client.request("GET", "/register")
     csrf_token = _extract_csrf_token(register_page.body)
     response = client.request(
@@ -43,6 +55,7 @@ def _register_user(
 
 
 def _login_user(client: TestClient, email: str, password: str) -> None:
+    """Helper for logging in via the HTML form."""
     login_page = client.request("GET", "/login")
     csrf_token = _extract_csrf_token(login_page.body)
     response = client.request(
@@ -155,6 +168,12 @@ def test_expired_session_is_revoked_and_cleared(server: ServerInfo) -> None:
     token_hash = hash_session_token(session_token)
     expires_at = (datetime.utcnow() - timedelta(minutes=5)).isoformat()
     with sqlite3.connect(server.db_path) as conn:
+        row = conn.execute(
+            "SELECT id FROM users WHERE email = ?",
+            (email.lower(),),
+        ).fetchone()
+        assert row is not None
+        user_id = row[0]
         conn.execute(
             "UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
             (expires_at, token_hash),
@@ -258,6 +277,97 @@ def test_photo_upload_persists_generated_description_field(server: ServerInfo) -
     payload = client.request("GET", "/api/profile")
     assert payload.status == 200
     assert "test.png" in payload.body
+
+
+def test_photo_metadata_endpoint_returns_data(server: ServerInfo) -> None:
+    client = TestClient(server.base_url)
+    unique = uuid4().hex[:8]
+    username = f"user{unique}"
+    email = f"{username}@example.com"
+    password = "password123"
+    _register_user(client, username, email, password)
+    _login_user(client, email, password)
+
+    image_base64 = base64.b64encode(b"fake image bytes").decode("utf-8")
+    upload = client.request(
+        "POST",
+        "/api/photos",
+        json_data={
+            "filename": "meta.png",
+            "image_base64": image_base64,
+        },
+        headers=_csrf_headers(client),
+    )
+    assert upload.status == 201
+    upload_payload = json.loads(upload.body)
+    image_id = upload_payload["id"]
+
+    with sqlite3.connect(server.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO image_metadata (
+                image_id,
+                user_id,
+                faces_json,
+                ocr_text,
+                caption,
+                lat,
+                lon,
+                loc_description,
+                loc_city,
+                loc_state,
+                loc_country,
+                make,
+                model,
+                iso,
+                f_stop,
+                shutter_speed,
+                focal_length,
+                width,
+                height,
+                file_size_mb,
+                taken_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                image_id,
+                user_id,
+                '[{"x":1,"y":2,"w":3,"h":4}]',
+                "hello world",
+                "a caption",
+                12.5,
+                -30.1,
+                "Somewhere",
+                "City",
+                "State",
+                "Country",
+                "CameraCo",
+                "Model X",
+                200,
+                2.8,
+                "1/60",
+                35.0,
+                800,
+                600,
+                1.2,
+                "2025-01-01T00:00:00+00:00",
+                datetime.utcnow().isoformat(),
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+
+    response = client.request(
+        "GET", f"/api/photos/metadata?photo_id={image_id}"
+    )
+    assert response.status == 200
+    payload = json.loads(response.body)
+    assert payload["caption"] == "a caption"
+    assert payload["ocr_text"] == "hello world"
+    assert payload["loc_city"] == "City"
 
 
 def test_profile_photo_sort_by_taken_date(server: ServerInfo) -> None:

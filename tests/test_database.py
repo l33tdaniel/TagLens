@@ -1,3 +1,13 @@
+"""
+Async tests for Database CRUD paths.
+
+Purpose:
+    Confirms user/session lifecycle and image metadata behaviors.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel)
+"""
+
 from datetime import datetime, timedelta
 
 import pytest
@@ -93,3 +103,45 @@ async def test_list_images_can_sort_by_taken_date(tmp_path) -> None:
     )
     rows = await db.list_images_for_user(user.id, sort_by="taken", order="asc")
     assert [row.filename for row in rows] == ["b.jpg", "a.jpg"]
+
+
+@pytest.mark.asyncio
+async def test_upsert_and_fetch_image_metadata(tmp_path) -> None:
+    db = Database(tmp_path / "test.db")
+    await db.initialize()
+    user = await db.create_user("dana", "dana@example.com", "hashed")
+
+    image = await db.create_image_metadata(
+        filename="meta.jpg",
+        faces_json="[]",
+        ocr_text="",
+        user_id=user.id,
+    )
+    await db.upsert_image_metadata(
+        image_id=image.id,
+        user_id=user.id,
+        faces_json='[{"x":1,"y":2,"w":3,"h":4}]',
+        ocr_text="hello world",
+        caption="a caption",
+        lat=12.5,
+        lon=-30.1,
+        loc_description="Somewhere",
+        loc_city="City",
+        loc_state="State",
+        loc_country="Country",
+        make="CameraCo",
+        model="Model X",
+        iso=200,
+        f_stop=2.8,
+        shutter_speed="1/60",
+        focal_length=35.0,
+        width=800,
+        height=600,
+        file_size_mb=1.2,
+        taken_at="2025-01-01T00:00:00+00:00",
+    )
+    stored = await db.fetch_image_metadata_for_user(image.id, user.id)
+    assert stored is not None
+    assert stored.caption == "a caption"
+    assert stored.ocr_text == "hello world"
+    assert stored.loc_city == "City"

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Purpose: run local lint/format/type checks for core python files.
+# Authorship (git history, mapped to real names): Daniel (l33tdaniel)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,3 +1,14 @@
+"""
+Metadata extraction pipeline for images and videos.
+
+Purpose:
+    Encapsulates optional dependencies (OCR, face detection, geocoding) and
+    provides best-effort extraction helpers used by the main app.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Srihari (dimes130), Arnav (arnav-jain1), Chloe (n518t893)
+"""
+
 from __future__ import annotations
 
 import base64
@@ -79,6 +90,7 @@ _face_cascade = None
 
 
 def _torch_available() -> bool:
+    """Check if torch can be imported without crashing."""
     try:
         import torch  # noqa: F401
     except Exception:
@@ -87,6 +99,7 @@ def _torch_available() -> bool:
 
 
 def _torch_device() -> str:
+    """Return the best available torch device (cuda/mps/cpu)."""
     try:
         import torch
     except Exception:
@@ -99,14 +112,17 @@ def _torch_device() -> str:
 
 
 def _ollama_endpoint() -> str:
+    """Return the base URL for the local Ollama server."""
     return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 
 
 def _ollama_model() -> str:
+    """Return the default Ollama model name used for captions."""
     return os.getenv("OLLAMA_MODEL", "qwen3.5:4b")
 
 
 def _get_easyocr_reader():
+    """Singleton initializer for EasyOCR (GPU if available)."""
     global _easyocr_reader
     if _easyocr_reader is not None:
         return _easyocr_reader
@@ -132,6 +148,7 @@ def _get_easyocr_reader():
 
 
 def _optional_cv2():
+    """Import cv2 if present; return None if unavailable."""
     try:
         import cv2
     except Exception:
@@ -140,6 +157,7 @@ def _optional_cv2():
 
 
 def _optional_numpy():
+    """Import numpy if present; return None if unavailable."""
     try:
         import numpy as np
     except Exception:
@@ -148,6 +166,7 @@ def _optional_numpy():
 
 
 def _optional_geopy():
+    """Import geopy's Nominatim geocoder if present; return None if unavailable."""
     try:
         from geopy.geocoders import Nominatim
     except Exception:
@@ -156,6 +175,7 @@ def _optional_geopy():
 
 
 def _optional_heif():
+    """Import pillow_heif if present; return None if unavailable."""
     try:
         import pillow_heif
     except Exception:
@@ -164,6 +184,7 @@ def _optional_heif():
 
 
 def _register_heif() -> None:
+    """Register HEIF decoder with Pillow when pillow_heif is available."""
     heif = _optional_heif()
     if heif:
         try:
@@ -173,6 +194,7 @@ def _register_heif() -> None:
 
 
 def _to_deci(val: Any) -> Optional[float]:
+    """Convert EXIF DMS tuples to decimal degrees."""
     try:
         return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
     except Exception:
@@ -180,6 +202,7 @@ def _to_deci(val: Any) -> Optional[float]:
 
 
 def _extract_gps(exif: Any) -> Tuple[Optional[float], Optional[float]]:
+    """Extract GPS lat/lon from EXIF data if present."""
     if not GPSTAGS or not exif:
         return None, None
     gps_info = exif.get_ifd(34853) if hasattr(exif, "get_ifd") else None
@@ -200,6 +223,7 @@ def _extract_gps(exif: Any) -> Tuple[Optional[float], Optional[float]]:
 
 
 def _reverse_geocode(lat: float, lon: float) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Reverse geocode lat/lon into description + city/state/country."""
     Nominatim = _optional_geopy()
     if not Nominatim:
         return None, None, None, None
@@ -217,6 +241,7 @@ def _reverse_geocode(lat: float, lon: float) -> Tuple[Optional[str], Optional[st
 
 
 def _get_face_cascade():
+    """Load and cache OpenCV's frontal-face cascade classifier."""
     global _face_cascade
     if _face_cascade is not None:
         return _face_cascade
@@ -235,6 +260,7 @@ def _get_face_cascade():
 
 
 def _extract_faces(img: "Image.Image") -> List[Dict[str, int]]:
+    """Detect faces and return bounding boxes in image coordinates."""
     face_cascade = _get_face_cascade()
     np = _optional_numpy()
     if not face_cascade or not np:
@@ -257,6 +283,7 @@ def _extract_faces(img: "Image.Image") -> List[Dict[str, int]]:
 
 
 def _extract_ocr(img: "Image.Image") -> str:
+    """Run OCR on the image and return concatenated text."""
     reader = _get_easyocr_reader()
     if reader is None:
         return ""
@@ -274,6 +301,7 @@ def _extract_ocr(img: "Image.Image") -> str:
 
 
 def _extract_caption(img: "Image.Image") -> str:
+    """Generate a caption using the local Ollama image model."""
     buf = io.BytesIO()
     try:
         rgb = img.convert("RGB") if img.mode != "RGB" else img
@@ -309,6 +337,7 @@ def _extract_caption(img: "Image.Image") -> str:
 
 
 def _extract_exif(img: "Image.Image") -> Dict[str, Any]:
+    """Extract relevant EXIF fields, normalizing values into primitives."""
     exif = img.getexif() if hasattr(img, "getexif") else None
     if not exif:
         return {
@@ -354,12 +383,14 @@ def extract_metadata_from_image(
     *,
     file_size_mb: Optional[float] = None,
 ) -> MetadataResult:
+    """Extract faces/OCR/caption/EXIF metadata from an in-memory image."""
     from concurrent.futures import ThreadPoolExecutor
 
     exif = _extract_exif(img)
     lat = exif.get("lat")
     lon = exif.get("lon")
 
+    # Parallelize the expensive pieces so UI requests stay responsive.
     with ThreadPoolExecutor(max_workers=4) as pool:
         face_fut = pool.submit(_extract_faces, img)
         ocr_fut = pool.submit(_extract_ocr, img)
@@ -404,6 +435,7 @@ def extract_metadata_from_bytes(
     *,
     filename: Optional[str] = None,
 ) -> Optional[MetadataResult]:
+    """Decode image bytes and extract metadata (returns None on failure)."""
     if Image is None:
         return None
     if not image_bytes:
@@ -418,6 +450,7 @@ def extract_metadata_from_bytes(
 
 
 def extract_metadata_from_path(path: str) -> Optional[MetadataResult]:
+    """Open an image from disk and extract metadata (returns None on failure)."""
     if Image is None:
         return None
     if not os.path.exists(path):
@@ -432,6 +465,7 @@ def extract_metadata_from_path(path: str) -> Optional[MetadataResult]:
 
 
 def metadata_to_dict(result: MetadataResult) -> Dict[str, Any]:
+    """Convert MetadataResult into JSON-serializable dict."""
     return {
         "faces": result.faces,
         "ocr_text": result.ocr_text,

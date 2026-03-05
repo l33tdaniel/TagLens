@@ -1,3 +1,13 @@
+"""
+SQLite persistence layer for TagLens.
+
+Purpose:
+    Defines DB schema, record dataclasses, and async helpers for CRUD access.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Chloe (n518t893)
+"""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -9,8 +19,6 @@ import re
 from typing import Any, AsyncIterator, Optional, Sequence
 
 import aiosqlite
-
-# Author: Daniel Neugent
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "data" / "users.db"
 
@@ -103,6 +111,7 @@ class Database:
         if self._conn is None:
             self._conn = await aiosqlite.connect(self.db_path)
             self._conn.row_factory = aiosqlite.Row
+            # WAL + foreign keys keep concurrency safe for multi-request access.
             await self._conn.execute("PRAGMA foreign_keys = ON;")
             await self._conn.execute("PRAGMA journal_mode = WAL;")
         return self._conn
@@ -121,6 +130,7 @@ class Database:
         """Create directories and ensure the users table exists."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self._connection() as conn:
+            # Core identity tables.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,6 +154,8 @@ class Database:
                     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
                 )
                 """)
+            # Images are stored in a single table; image_data is optional when
+            # using remote storage or lazy loading.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,6 +173,8 @@ class Database:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
                 """)
+            # Metadata is separate to allow incremental enrichment without
+            # rewriting the image row.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS image_metadata (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,6 +205,7 @@ class Database:
                 )
                 """)
             try:
+                # One-time migration for older DBs missing ai_description.
                 await conn.execute(
                     "ALTER TABLE images ADD COLUMN ai_description TEXT NOT NULL DEFAULT ''"
                 )

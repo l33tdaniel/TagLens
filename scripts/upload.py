@@ -1,3 +1,14 @@
+"""
+Backblaze B2 upload/download helpers (standalone script).
+
+Purpose:
+    Simple utilities for uploading test files to B2 or pulling them down
+    during development.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Arnav (arnav-jain1)
+"""
+
 from b2sdk.v2 import InMemoryAccountInfo, B2Api
 from dotenv import load_dotenv
 import os
@@ -26,6 +37,7 @@ bucket = b2_api.get_bucket_by_name(BUCKET_NAME)
 
 
 def upload_to_b2(local_path, b2_name):
+    """Upload a local file to the configured B2 bucket."""
     try:
         # 4. Upload the File
         file_info = bucket.upload_local_file(local_file=local_path, file_name=b2_name)
@@ -43,6 +55,7 @@ def upload_to_b2(local_path, b2_name):
 
 # TEMP
 def download_from_b2(b2_file_path, local_save_path):
+    """Download a file from B2 into a local path for debugging."""
     print(f"Connecting to Backblaze to find: {b2_file_path}...")
 
     try:

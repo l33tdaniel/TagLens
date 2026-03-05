@@ -1,8 +1,19 @@
+"""
+DB inspection helpers for the legacy photos schema.
+
+Purpose:
+    Quick sanity checks for photos, stats, FTS, and vector tables.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Arnav (arnav-jain1)
+"""
+
 import sqlite3
 import sqlite_vec
 
 
 def check_db_contents(db_path="data\\photos.db"):
+    """Print full table dumps to validate schema/population."""
     # 1. Connect and load the vector extension
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
@@ -58,6 +69,7 @@ def check_db_contents(db_path="data\\photos.db"):
 
 
 def check_db_filepath(db_path="data\\photos.db"):
+    """Return all stored filepaths so caller can verify uploads."""
     # 1. Connect and load the vector extension
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
@@ -76,6 +88,7 @@ def check_db_filepath(db_path="data\\photos.db"):
 
 
 def check(db_path="data\\photos.db"):
+    """Print a short sample of recent photos for quick sanity checks."""
     # 1. Connect and load the vector extension
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)

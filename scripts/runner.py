@@ -1,3 +1,13 @@
+"""
+Bulk ingestion runner for the legacy metadata pipeline.
+
+Purpose:
+    Walks a directory tree, extracts metadata, and stores photo/video rows.
+
+Authorship (git history, mapped to real names):
+    Daniel (l33tdaniel), Arnav (arnav-jain1)
+"""
+
 from scripts.metadata import get_complete_metadata, handle_video
 from pathlib import Path
 import time
@@ -11,6 +21,7 @@ def process_all_images(start_directory: str, conn, user_id):
     then runs a function on each one.
     """
 
+    # Skip files already stored in the DB so reruns are idempotent.
     done = check_db_filepath()
 
     valid_extensions = {

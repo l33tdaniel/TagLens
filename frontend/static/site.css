@@ -1,3 +1,6 @@
+/* Purpose: global styles and layout helpers for the TagLens UI.
+ * Authorship (git history, mapped to real names): Daniel (l33tdaniel)
+ */
 :root {
   --creamsicle-bg: #fff7f0;
   --creamsicle-primary: #ff8c42;

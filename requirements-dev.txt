@@ -1,3 +1,5 @@
+# Purpose: developer/test dependencies for TagLens.
+# Authorship (git history, mapped to real names): Daniel (l33tdaniel)
 black>=24.1
 ruff>=0.0.306
 types-passlib>=1.7

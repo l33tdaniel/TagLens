@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Purpose: bootstrap environment variables and launch the Robyn server.
+# Authorship (git history, mapped to real names): Daniel (l33tdaniel)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -57,7 +59,8 @@ export ROBYN_PORT="${PORT}"
 
 DEV_MODE="${DEV_MODE:-0}"
 DEV_FLAG=""
-case "${DEV_MODE,,}" in
+DEV_MODE_LC="$(printf '%s' "${DEV_MODE}" | tr '[:upper:]' '[:lower:]')"
+case "${DEV_MODE_LC}" in
   1|true|yes|on)
     DEV_FLAG="--dev"
     ;;
