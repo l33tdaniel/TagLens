@@ -562,16 +562,32 @@ def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict
     except Exception:
         pass
 
-    # Faces (insightface)
+    # Faces — try insightface first, fall back to OpenCV Haar cascade
     try:
         from scripts.insightface_tagging import _detect_faces_with_insightface
         detected = _detect_faces_with_insightface(image_bytes)
-        data["faces"] = [
-            {"x": f["x"], "y": f["y"], "w": f["w"], "h": f["h"]}
-            for f in detected
-        ]
+        if detected:
+            data["faces"] = [
+                {"x": f["x"], "y": f["y"], "w": f["w"], "h": f["h"]}
+                for f in detected
+            ]
     except Exception:
         pass
+    if not data["faces"]:
+        try:
+            import cv2 as _cv2
+            import numpy as np
+            rgb = np.array(img.convert("RGB"))
+            gray = _cv2.cvtColor(rgb, _cv2.COLOR_RGB2GRAY)
+            cascade_path = _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            cascade = _cv2.CascadeClassifier(cascade_path)
+            rects = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            data["faces"] = [
+                {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                for (x, y, w, h) in rects
+            ]
+        except Exception:
+            pass
 
     # Caption (Ollama)
     try:
@@ -1158,6 +1174,25 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
             exc_info=True,
         )
+    # Fallback to OpenCV Haar cascade if insightface found nothing
+    if faces_json == "[]":
+        try:
+            import cv2 as _cv2
+            import numpy as _np
+            _pil_img = Image.open(io.BytesIO(image_bytes))
+            _rgb = _np.array(_pil_img.convert("RGB"))
+            _gray = _cv2.cvtColor(_rgb, _cv2.COLOR_RGB2GRAY)
+            _cascade = _cv2.CascadeClassifier(
+                _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            if len(_rects) > 0:
+                faces_json = json.dumps([
+                    {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                    for (x, y, w, h) in _rects
+                ])
+        except Exception:
+            pass
 
     try:
         # 2. Insert metadata first to get photo_id.
@@ -1277,10 +1312,44 @@ async def photo_metadata_api(request: Request) -> Response:
     photo_id = int(raw_photo_id)
 
     record = await db.fetch_image_metadata_for_user(photo_id, auth.user.id)
-    if not record:
-        return _json_response({"error": "metadata not found"}, status=404)
+    if record:
+        return _json_response(_metadata_response_dict(record))
 
-    return _json_response(_metadata_response_dict(record))
+    # Fallback: build metadata from the images table + image dimensions
+    img_record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not img_record:
+        return _json_response({"error": "photo not found"}, status=404)
+
+    faces = public_faces_payload(img_record.faces_json)
+    width, height = None, None
+    try:
+        image_bytes = img_record.image_data
+        if not image_bytes and bucket is not None:
+            image_bytes = await asyncio.to_thread(
+                _fetch_bucket_image_bytes, auth.user.id, photo_id, img_record.filename
+            )
+        if image_bytes and Image is not None:
+            with Image.open(io.BytesIO(image_bytes)) as pil_img:
+                width, height = pil_img.size
+    except Exception:
+        pass
+
+    return _json_response({
+        "image_id": photo_id,
+        "faces": faces,
+        "ocr_text": img_record.ocr_text or "",
+        "caption": img_record.ai_description or "",
+        "width": width,
+        "height": height,
+        "file_size_mb": round(len(img_record.image_data) / (1024 * 1024), 2) if img_record.image_data else None,
+        "taken_at": img_record.taken_at,
+        "created_at": img_record.created_at,
+        "lat": None, "lon": None,
+        "loc_description": None, "loc_city": None, "loc_state": None, "loc_country": None,
+        "make": None, "model": None, "iso": None, "f_stop": None,
+        "shutter_speed": None, "focal_length": None,
+        "updated_at": None,
+    })
 
 
 @app.get("/api/photos/download")
