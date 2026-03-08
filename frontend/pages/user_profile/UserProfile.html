@@ -389,7 +389,7 @@
       try {
         const res = await fetch("/api/photos/recaption", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
           body: JSON.stringify({ photo_id: currentPhotoId }),
         });
         const data = await res.json();
