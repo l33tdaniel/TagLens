@@ -60,22 +60,6 @@ from scripts.insightface_tagging import (
     public_faces_payload,
 )
 from scripts.upload_metadata import extract_upload_metadata
-try:
-    from scripts.metadata import (
-        extract_metadata_from_bytes,
-        metadata_to_dict,
-        dependency_report,
-        missing_dependencies,
-        warmup as metadata_warmup,
-        cleanup as metadata_cleanup,
-    )
-except Exception:
-    extract_metadata_from_bytes = None
-    metadata_to_dict = None
-    dependency_report = None
-    missing_dependencies = None
-    metadata_warmup = None
-    metadata_cleanup = None
 import aiosqlite
 
 app = Robyn(__file__)
@@ -496,17 +480,107 @@ def _ollama_model() -> str:
     return os.getenv("OLLAMA_MODEL", "llava")
 
 
-def _metadata_enabled() -> bool:
-    raw = os.getenv("TAGLENS_METADATA_ENABLED", "1").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict:
+    """Extract EXIF, dimensions, OCR, and faces from raw image bytes."""
+    from PIL.ExifTags import GPSTAGS
 
+    data: dict = {
+        "width": None, "height": None, "file_size_mb": None,
+        "make": None, "model": None, "taken_at": None,
+        "iso": None, "f_stop": None, "shutter_speed": None, "focal_length": None,
+        "lat": None, "lon": None,
+        "loc_description": None, "loc_city": None, "loc_state": None, "loc_country": None,
+        "ocr_text": "", "caption": "", "faces": [],
+    }
+    if not image_bytes or Image is None:
+        return data
 
-def _metadata_dependency_report() -> dict:
-    if dependency_report is None:
-        return {"available": {}, "missing": ["metadata_module_unavailable"]}
-    report = dependency_report()
-    missing = [name for name, present in report.items() if not present]
-    return {"available": report, "missing": missing}
+    data["file_size_mb"] = round(len(image_bytes) / (1024 * 1024), 2)
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+    except Exception:
+        return data
+
+    data["width"], data["height"] = img.size
+
+    # EXIF
+    try:
+        exif = img.getexif()
+        exif_ifd = exif.get_ifd(34665)
+        gps_info = exif.get_ifd(34853)
+
+        data["make"] = exif.get(271) or None
+        data["model"] = exif.get(272) or None
+        raw_date = exif.get(36867) or exif.get(306)
+        if raw_date:
+            raw_text = str(raw_date).strip()
+            for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    data["taken_at"] = datetime.strptime(raw_text, fmt).isoformat()
+                    break
+                except ValueError:
+                    continue
+
+        iso = exif_ifd.get(34855)
+        data["iso"] = int(iso) if iso else None
+        f_stop = exif_ifd.get(33437)
+        data["f_stop"] = float(f_stop) if f_stop else None
+        focal = exif_ifd.get(37386)
+        data["focal_length"] = float(focal) if focal else None
+        exposure = exif_ifd.get(33434)
+        if exposure and isinstance(exposure, (int, float)) and 0 < exposure < 1:
+            data["shutter_speed"] = f"1/{int(1/exposure)}"
+        elif exposure:
+            data["shutter_speed"] = str(exposure)
+
+        # GPS
+        if gps_info and len(gps_info) > 1:
+            raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
+            lat_val = raw_gps.get("GPSLatitude")
+            lon_val = raw_gps.get("GPSLongitude")
+            if lat_val and lon_val:
+                try:
+                    to_dec = lambda v: float(v[0]) + float(v[1]) / 60.0 + float(v[2]) / 3600.0
+                    lat = to_dec(lat_val)
+                    lon = to_dec(lon_val)
+                    if raw_gps.get("GPSLatitudeRef") == "S":
+                        lat = -lat
+                    if raw_gps.get("GPSLongitudeRef") == "W":
+                        lon = -lon
+                    data["lat"] = lat
+                    data["lon"] = lon
+                except (ZeroDivisionError, TypeError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+    # OCR
+    try:
+        extracted = extract_upload_metadata(image_bytes)
+        data["ocr_text"] = extracted.ocr_text or ""
+    except Exception:
+        pass
+
+    # Faces (insightface)
+    try:
+        from scripts.insightface_tagging import _detect_faces_with_insightface
+        detected = _detect_faces_with_insightface(image_bytes)
+        data["faces"] = [
+            {"x": f["x"], "y": f["y"], "w": f["w"], "h": f["h"]}
+            for f in detected
+        ]
+    except Exception:
+        pass
+
+    # Caption (Ollama)
+    try:
+        caption = _generate_image_description_with_ollama(image_bytes, filename=filename)
+        data["caption"] = caption or ""
+    except Exception:
+        pass
+
+    return data
 
 
 async def _process_image_metadata(
@@ -516,25 +590,23 @@ async def _process_image_metadata(
     filename: str,
     image_bytes: bytes,
 ) -> None:
-    if not _metadata_enabled():
-        return
-    if extract_metadata_from_bytes is None or metadata_to_dict is None:
-        logger.info(
-            "metadata extraction skipped image_id=%s reason=deps_missing", image_id,
-        )
-        return
     try:
-        result = await asyncio.to_thread(
-            extract_metadata_from_bytes, image_bytes, filename=filename,
+        data = await asyncio.to_thread(
+            _extract_metadata_from_bytes, image_bytes, filename,
         )
     except Exception:
         logger.exception(
             "metadata extraction failed image_id=%s filename=%s", image_id, filename,
         )
         return
-    if not result:
-        return
-    data = metadata_to_dict(result)
+
+    # Run face tagging with identity matching
+    try:
+        faces = await detect_and_tag_faces_for_user(user_id, image_bytes, db)
+        data["faces"] = faces
+    except Exception:
+        logger.warning("face tagging failed image_id=%s", image_id, exc_info=True)
+
     try:
         await db.upsert_image_metadata(
             image_id=image_id,
