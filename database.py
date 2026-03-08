@@ -71,6 +71,34 @@ class ImageRecord:
 
 
 @dataclass
+class ImageMetadataRecord:
+    id: int
+    image_id: int
+    user_id: int
+    faces_json: str
+    ocr_text: str
+    caption: str
+    lat: Optional[float]
+    lon: Optional[float]
+    loc_description: Optional[str]
+    loc_city: Optional[str]
+    loc_state: Optional[str]
+    loc_country: Optional[str]
+    make: Optional[str]
+    model: Optional[str]
+    iso: Optional[int]
+    f_stop: Optional[float]
+    shutter_speed: Optional[str]
+    focal_length: Optional[float]
+    width: Optional[int]
+    height: Optional[int]
+    file_size_mb: Optional[float]
+    taken_at: Optional[str]
+    created_at: str
+    updated_at: str
+
+
+@dataclass
 class FaceEmbeddingRecord:
     user_id: int
     tag: str
@@ -137,6 +165,35 @@ class Database:
                     taken_at TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                )
+                """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS image_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    image_id INTEGER NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL,
+                    faces_json TEXT NOT NULL DEFAULT '[]',
+                    ocr_text TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    lat REAL,
+                    lon REAL,
+                    loc_description TEXT,
+                    loc_city TEXT,
+                    loc_state TEXT,
+                    loc_country TEXT,
+                    make TEXT,
+                    model TEXT,
+                    iso INTEGER,
+                    f_stop REAL,
+                    shutter_speed TEXT,
+                    focal_length REAL,
+                    width INTEGER,
+                    height INTEGER,
+                    file_size_mb REAL,
+                    taken_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
                 )
                 """)
             await conn.execute(
@@ -457,6 +514,138 @@ class Database:
             deleted = cursor.rowcount or 0
             await cursor.close()
         return deleted > 0
+
+    async def fetch_image_metadata_for_user(
+        self, image_id: int, user_id: int
+    ) -> Optional[ImageMetadataRecord]:
+        row = await self.fetch_one(
+            """
+            SELECT
+                id, image_id, user_id, faces_json, ocr_text, caption,
+                lat, lon, loc_description, loc_city, loc_state, loc_country,
+                make, model, iso, f_stop, shutter_speed, focal_length,
+                width, height, file_size_mb, taken_at, created_at, updated_at
+            FROM image_metadata
+            WHERE image_id = ? AND user_id = ?
+            """,
+            (image_id, user_id),
+        )
+        return ImageMetadataRecord(**row) if row else None
+
+    async def upsert_image_metadata(
+        self,
+        *,
+        image_id: int,
+        user_id: int,
+        faces_json: str,
+        ocr_text: str,
+        caption: str,
+        lat: Optional[float],
+        lon: Optional[float],
+        loc_description: Optional[str],
+        loc_city: Optional[str],
+        loc_state: Optional[str],
+        loc_country: Optional[str],
+        make: Optional[str],
+        model: Optional[str],
+        iso: Optional[int],
+        f_stop: Optional[float],
+        shutter_speed: Optional[str],
+        focal_length: Optional[float],
+        width: Optional[int],
+        height: Optional[int],
+        file_size_mb: Optional[float],
+        taken_at: Optional[str],
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        async with self._connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO image_metadata (
+                    image_id, user_id, faces_json, ocr_text, caption,
+                    lat, lon, loc_description, loc_city, loc_state, loc_country,
+                    make, model, iso, f_stop, shutter_speed, focal_length,
+                    width, height, file_size_mb, taken_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(image_id) DO UPDATE SET
+                    faces_json=excluded.faces_json,
+                    ocr_text=excluded.ocr_text,
+                    caption=excluded.caption,
+                    lat=excluded.lat,
+                    lon=excluded.lon,
+                    loc_description=excluded.loc_description,
+                    loc_city=excluded.loc_city,
+                    loc_state=excluded.loc_state,
+                    loc_country=excluded.loc_country,
+                    make=excluded.make,
+                    model=excluded.model,
+                    iso=excluded.iso,
+                    f_stop=excluded.f_stop,
+                    shutter_speed=excluded.shutter_speed,
+                    focal_length=excluded.focal_length,
+                    width=excluded.width,
+                    height=excluded.height,
+                    file_size_mb=excluded.file_size_mb,
+                    taken_at=excluded.taken_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    image_id, user_id, faces_json, ocr_text, caption,
+                    lat, lon, loc_description, loc_city, loc_state, loc_country,
+                    make, model, iso, f_stop, shutter_speed, focal_length,
+                    width, height, file_size_mb, taken_at, now, now,
+                ),
+            )
+            await conn.commit()
+
+    async def update_image_description(
+        self, image_id: int, user_id: int, description: str
+    ) -> None:
+        async with self._connection() as conn:
+            await conn.execute(
+                "UPDATE images SET ai_description = ? WHERE id = ? AND user_id = ?",
+                (description, image_id, user_id),
+            )
+            await conn.commit()
+
+    async def populate_fts_for_image(self, image_id: int, user_id: int) -> None:
+        async with self._connection() as conn:
+            cursor = await conn.execute(
+                "SELECT filename, ai_description, ocr_text FROM images WHERE id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            img_row = await cursor.fetchone()
+            await cursor.close()
+            if not img_row:
+                return
+
+            cursor = await conn.execute(
+                "SELECT caption, ocr_text, loc_description, loc_city, loc_state, loc_country FROM image_metadata WHERE image_id = ? AND user_id = ?",
+                (image_id, user_id),
+            )
+            meta_row = await cursor.fetchone()
+            await cursor.close()
+
+            caption = ""
+            location = ""
+            meta_ocr = ""
+            if meta_row:
+                caption = meta_row["caption"] or ""
+                meta_ocr = meta_row["ocr_text"] or ""
+                location = " ".join(
+                    filter(None, [meta_row["loc_description"], meta_row["loc_city"],
+                                  meta_row["loc_state"], meta_row["loc_country"]])
+                )
+
+            ocr_text = img_row["ocr_text"] or meta_ocr
+
+            await conn.execute("DELETE FROM images_fts WHERE image_id = ?", (str(image_id),))
+            await conn.execute(
+                "INSERT INTO images_fts (image_id, filename, ai_description, ocr_text, caption, location) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(image_id), img_row["filename"] or "", img_row["ai_description"] or "", ocr_text, caption, location),
+            )
+            await conn.commit()
 
     async def list_face_embeddings_for_user(self, user_id: int) -> list[FaceEmbeddingRecord]:
         async with self._connection() as conn:

@@ -60,6 +60,22 @@ from scripts.insightface_tagging import (
     public_faces_payload,
 )
 from scripts.upload_metadata import extract_upload_metadata
+try:
+    from scripts.metadata import (
+        extract_metadata_from_bytes,
+        metadata_to_dict,
+        dependency_report,
+        missing_dependencies,
+        warmup as metadata_warmup,
+        cleanup as metadata_cleanup,
+    )
+except Exception:
+    extract_metadata_from_bytes = None
+    metadata_to_dict = None
+    dependency_report = None
+    missing_dependencies = None
+    metadata_warmup = None
+    metadata_cleanup = None
 import aiosqlite
 
 app = Robyn(__file__)
@@ -478,6 +494,111 @@ def _ollama_endpoint() -> str:
 
 def _ollama_model() -> str:
     return os.getenv("OLLAMA_MODEL", "llava")
+
+
+def _metadata_enabled() -> bool:
+    raw = os.getenv("TAGLENS_METADATA_ENABLED", "1").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _metadata_dependency_report() -> dict:
+    if dependency_report is None:
+        return {"available": {}, "missing": ["metadata_module_unavailable"]}
+    report = dependency_report()
+    missing = [name for name, present in report.items() if not present]
+    return {"available": report, "missing": missing}
+
+
+async def _process_image_metadata(
+    *,
+    image_id: int,
+    user_id: int,
+    filename: str,
+    image_bytes: bytes,
+) -> None:
+    if not _metadata_enabled():
+        return
+    if extract_metadata_from_bytes is None or metadata_to_dict is None:
+        logger.info(
+            "metadata extraction skipped image_id=%s reason=deps_missing", image_id,
+        )
+        return
+    try:
+        result = await asyncio.to_thread(
+            extract_metadata_from_bytes, image_bytes, filename=filename,
+        )
+    except Exception:
+        logger.exception(
+            "metadata extraction failed image_id=%s filename=%s", image_id, filename,
+        )
+        return
+    if not result:
+        return
+    data = metadata_to_dict(result)
+    try:
+        await db.upsert_image_metadata(
+            image_id=image_id,
+            user_id=user_id,
+            faces_json=json.dumps(data.get("faces") or []),
+            ocr_text=str(data.get("ocr_text") or ""),
+            caption=str(data.get("caption") or ""),
+            lat=data.get("lat"),
+            lon=data.get("lon"),
+            loc_description=data.get("loc_description"),
+            loc_city=data.get("loc_city"),
+            loc_state=data.get("loc_state"),
+            loc_country=data.get("loc_country"),
+            make=data.get("make"),
+            model=data.get("model"),
+            iso=data.get("iso"),
+            f_stop=data.get("f_stop"),
+            shutter_speed=data.get("shutter_speed"),
+            focal_length=data.get("focal_length"),
+            width=data.get("width"),
+            height=data.get("height"),
+            file_size_mb=data.get("file_size_mb"),
+            taken_at=data.get("taken_at"),
+        )
+        logger.info("metadata stored image_id=%s filename=%s", image_id, filename)
+        caption = str(data.get("caption") or "")
+        if caption:
+            await db.update_image_description(image_id, user_id, caption)
+        await db.populate_fts_for_image(image_id, user_id)
+    except Exception:
+        logger.exception(
+            "metadata store failed image_id=%s filename=%s", image_id, filename,
+        )
+
+
+def _metadata_response_dict(record) -> dict:
+    try:
+        faces = json.loads(record.faces_json or "[]")
+    except json.JSONDecodeError:
+        faces = []
+    return {
+        "image_id": record.image_id,
+        "faces": faces,
+        "ocr_text": record.ocr_text,
+        "caption": record.caption,
+        "lat": record.lat,
+        "lon": record.lon,
+        "loc_description": record.loc_description,
+        "loc_city": record.loc_city,
+        "loc_state": record.loc_state,
+        "loc_country": record.loc_country,
+        "make": record.make,
+        "model": record.model,
+        "iso": record.iso,
+        "f_stop": record.f_stop,
+        "shutter_speed": record.shutter_speed,
+        "focal_length": record.focal_length,
+        "width": record.width,
+        "height": record.height,
+        "file_size_mb": record.file_size_mb,
+        "taken_at": record.taken_at,
+        "created_at": record.created_at,
+        "updated_at": record.updated_at,
+    }
 
 
 def _normalize_content_type(content_type: str, filename: str) -> str:
@@ -1031,6 +1152,63 @@ async def upload_photo_api(request: Request) -> Response:
         },
         status=201,
     )
+
+
+@app.post("/api/photos/recaption")
+async def recaption_photo_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+
+    body = _json_data(request)
+    photo_id = body.get("photo_id")
+    if not isinstance(photo_id, int):
+        return _json_response({"error": "photo_id (int) required"}, status=400)
+
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+
+    image_bytes = record.image_data
+    if not image_bytes:
+        image_bytes = await asyncio.to_thread(
+            _fetch_bucket_image_bytes, auth.user.id, photo_id, record.filename
+        )
+    if not image_bytes:
+        return _json_response({"error": "image data unavailable"}, status=404)
+
+    await _process_image_metadata(
+        image_id=photo_id,
+        user_id=auth.user.id,
+        filename=record.filename,
+        image_bytes=image_bytes,
+    )
+
+    meta = await db.fetch_image_metadata_for_user(photo_id, auth.user.id)
+    if not meta:
+        return _json_response({"error": "metadata generation failed"}, status=500)
+
+    return _json_response({"ok": True, "metadata": _metadata_response_dict(meta)})
+
+
+@app.get("/api/photos/metadata")
+async def photo_metadata_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+
+    raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
+    if not raw_photo_id.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(raw_photo_id)
+
+    record = await db.fetch_image_metadata_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "metadata not found"}, status=404)
+
+    return _json_response(_metadata_response_dict(record))
 
 
 @app.get("/api/photos/download")
