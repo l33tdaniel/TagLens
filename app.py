@@ -571,23 +571,31 @@ def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict
                 {"x": f["x"], "y": f["y"], "w": f["w"], "h": f["h"]}
                 for f in detected
             ]
+            logger.info("insightface detected %d faces", len(detected))
     except Exception:
-        pass
+        logger.info("insightface unavailable, using Haar cascade fallback")
     if not data["faces"]:
         try:
             import cv2 as _cv2
             import numpy as np
-            rgb = np.array(img.convert("RGB"))
+            rgb_img = img.convert("RGB")
+            rgb = np.array(rgb_img)
             gray = _cv2.cvtColor(rgb, _cv2.COLOR_RGB2GRAY)
-            cascade_path = _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            cascade = _cv2.CascadeClassifier(cascade_path)
-            rects = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            data["faces"] = [
-                {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
-                for (x, y, w, h) in rects
-            ]
+            logger.info("haar cascade input: %dx%d gray shape=%s", rgb_img.width, rgb_img.height, gray.shape)
+            for cascade_name in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
+                cascade = _cv2.CascadeClassifier(_cv2.data.haarcascades + cascade_name)
+                rects = cascade.detectMultiScale(
+                    gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20)
+                )
+                logger.info("haar %s: %d faces detected", cascade_name, len(rects))
+                if len(rects) > 0:
+                    data["faces"] = [
+                        {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                        for (x, y, w, h) in rects
+                    ]
+                    break
         except Exception:
-            pass
+            logger.exception("haar cascade face detection failed")
 
     # Caption (Ollama)
     try:
@@ -616,10 +624,11 @@ async def _process_image_metadata(
         )
         return
 
-    # Run face tagging with identity matching
+    # Run face tagging with identity matching (insightface); keep Haar results as fallback
     try:
         faces = await detect_and_tag_faces_for_user(user_id, image_bytes, db)
-        data["faces"] = faces
+        if faces:
+            data["faces"] = faces
     except Exception:
         logger.warning("face tagging failed image_id=%s", image_id, exc_info=True)
 
@@ -1182,15 +1191,15 @@ async def upload_photo_api(request: Request) -> Response:
             _pil_img = Image.open(io.BytesIO(image_bytes))
             _rgb = _np.array(_pil_img.convert("RGB"))
             _gray = _cv2.cvtColor(_rgb, _cv2.COLOR_RGB2GRAY)
-            _cascade = _cv2.CascadeClassifier(
-                _cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
-            _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-            if len(_rects) > 0:
-                faces_json = json.dumps([
-                    {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
-                    for (x, y, w, h) in _rects
-                ])
+            for _cname in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
+                _cascade = _cv2.CascadeClassifier(_cv2.data.haarcascades + _cname)
+                _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
+                if len(_rects) > 0:
+                    faces_json = json.dumps([
+                        {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
+                        for (x, y, w, h) in _rects
+                    ])
+                    break
         except Exception:
             pass
 
