@@ -582,10 +582,12 @@ def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict
             rgb = np.array(rgb_img)
             gray = _cv2.cvtColor(rgb, _cv2.COLOR_RGB2GRAY)
             logger.info("haar cascade input: %dx%d gray shape=%s", rgb_img.width, rgb_img.height, gray.shape)
+            img_h, img_w = gray.shape[:2]
+            min_face = max(30, min(img_h, img_w) // 10)
             for cascade_name in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
                 cascade = _cv2.CascadeClassifier(_cv2.data.haarcascades + cascade_name)
                 rects = cascade.detectMultiScale(
-                    gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20)
+                    gray, scaleFactor=1.1, minNeighbors=6, minSize=(min_face, min_face)
                 )
                 logger.info("haar %s: %d faces detected", cascade_name, len(rects))
                 if len(rects) > 0:
@@ -1191,9 +1193,11 @@ async def upload_photo_api(request: Request) -> Response:
             _pil_img = Image.open(io.BytesIO(image_bytes))
             _rgb = _np.array(_pil_img.convert("RGB"))
             _gray = _cv2.cvtColor(_rgb, _cv2.COLOR_RGB2GRAY)
+            _img_h, _img_w = _gray.shape[:2]
+            _min_face = max(30, min(_img_h, _img_w) // 10)
             for _cname in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
                 _cascade = _cv2.CascadeClassifier(_cv2.data.haarcascades + _cname)
-                _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
+                _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.1, minNeighbors=6, minSize=(_min_face, _min_face))
                 if len(_rects) > 0:
                     faces_json = json.dumps([
                         {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
