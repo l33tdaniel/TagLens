@@ -225,17 +225,64 @@ function fileToBase64(file) {
   });
 }
 
+async function sha1Hex(arrayBuffer) {
+  const hash = await crypto.subtle.digest("SHA-1", arrayBuffer);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function uploadSingleFile(file) {
-  const imageBase64 = await fileToBase64(file);
-  const payload = {
-    filename: file.name,
-    image_base64: imageBase64,
-    content_type: file.type || "application/octet-stream",
-  };
-  const response = await fetch("/api/photos", {
+  const bytes = await file.arrayBuffer();
+  const csrf = getCsrfToken();
+
+  // Prefer browser-direct B2 uploads when enabled on the server.
+  try {
+    const initRes = await fetch("/api/uploads/b2/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || "application/octet-stream",
+      }),
+    });
+    const initBody = await initRes.json().catch(() => ({}));
+    if (initRes.ok) {
+      const sha1 = await sha1Hex(bytes);
+      const uploadRes = await fetch(initBody.upload_url, {
+        method: "POST",
+        headers: {
+          Authorization: initBody.authorization_token,
+          "X-Bz-File-Name": encodeURIComponent(initBody.file_key),
+          "Content-Type": initBody.content_type || (file.type || "application/octet-stream"),
+          "X-Bz-Content-Sha1": sha1,
+        },
+        body: bytes,
+      });
+      if (!uploadRes.ok) {
+        const text = await uploadRes.text().catch(() => "");
+        throw new Error(`B2 upload failed (${uploadRes.status}) ${text}`.slice(0, 300));
+      }
+      const completeRes = await fetch("/api/uploads/b2/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        body: JSON.stringify({ photo_id: initBody.photo_id }),
+      });
+      const completeBody = await completeRes.json().catch(() => ({}));
+      if (!completeRes.ok) {
+        throw new Error(completeBody.error || `Finalize failed (${completeRes.status})`);
+      }
+      return { id: initBody.photo_id, processing: true };
+    }
+  } catch (e) {
+    // Fall back to server upload path below.
+  }
+
+  // Fallback: upload raw bytes to the server (server writes to B2/SQLite).
+  const url = `/api/photos/raw?filename=${encodeURIComponent(file.name)}`;
+  const response = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
-    body: JSON.stringify(payload),
+    headers: { "Content-Type": file.type || "application/octet-stream", "X-CSRF-Token": csrf },
+    body: bytes,
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {

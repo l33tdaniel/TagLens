@@ -62,6 +62,38 @@
           </div>
 
         </div>
+
+        <!-- Privacy settings -->
+        <div class="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="rounded-2xl border border-orange-200 bg-white/60 p-5">
+            <p class="text-sm font-semibold text-gray-900">Privacy Controls</p>
+            <p class="mt-1 text-xs text-gray-500">Choose what TagLens derives from new uploads.</p>
+            <div class="mt-4 space-y-3">
+              <label class="flex items-center justify-between gap-3">
+                <span class="text-sm text-gray-700">AI descriptions</span>
+                <input id="privacyAi" type="checkbox" class="h-4 w-4 accent-orange-500" />
+              </label>
+              <label class="flex items-center justify-between gap-3">
+                <span class="text-sm text-gray-700">OCR text</span>
+                <input id="privacyOcr" type="checkbox" class="h-4 w-4 accent-orange-500" />
+              </label>
+              <label class="flex items-center justify-between gap-3">
+                <span class="text-sm text-gray-700">Face recognition</span>
+                <input id="privacyFaces" type="checkbox" class="h-4 w-4 accent-orange-500" />
+              </label>
+              <label class="flex items-center justify-between gap-3">
+                <span class="text-sm text-gray-700">Store originals</span>
+                <input id="privacyOriginals" type="checkbox" class="h-4 w-4 accent-orange-500" />
+              </label>
+              <label class="flex items-center justify-between gap-3">
+                <span class="text-sm text-gray-700">Retention (days)</span>
+                <input id="privacyRetention" type="number" min="1" step="1" placeholder="(off)"
+                       class="w-24 rounded-full border border-orange-200 bg-white/80 px-3 py-1 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-orange-200" />
+              </label>
+              <p id="privacyStatus" class="text-xs text-gray-500"></p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -100,6 +132,10 @@
       <div class="flex items-center justify-between mb-3 px-1">
         <div class="flex items-center gap-2 max-w-lg min-w-0">
           <p id="lightboxCaption" class="text-white/80 text-sm truncate"></p>
+          <span id="processingBadge"
+                class="hidden flex-shrink-0 px-2 py-0.5 rounded-full bg-orange-500/20 border border-orange-300/30 text-orange-100 text-[11px]">
+            Processing…
+          </span>
           <button id="editDescBtn" onclick="startEditDescription()"
                   class="flex-shrink-0 w-7 h-7 rounded-full bg-white/10 border border-white/20 text-white/60 text-xs hover:bg-white/20 transition flex items-center justify-center"
                   title="Edit description">&#9998;</button>
@@ -113,6 +149,10 @@
           </div>
         </div>
         <div class="flex items-center gap-2">
+          <button id="shareBtn" onclick="shareCurrentPhoto()"
+                  class="px-3 py-1.5 rounded-full bg-white/10 border border-white/20 text-white/70 text-sm font-medium hover:bg-white/20 transition">
+            Share
+          </button>
           <!-- Toggle Faces button -->
           <button id="toggleFaces" onclick="toggleFaceOverlay()"
                   class="hidden flex items-center gap-1.5 px-3 py-1.5 rounded-full
@@ -168,6 +208,8 @@
         <div id="metaLocation" class="meta-item"></div>
         <div id="metaDimensions" class="meta-item"></div>
         <div id="metaTakenAt" class="meta-item"></div>
+        <div id="metaShares" class="meta-item col-span-2"></div>
+        <div id="metaAcl" class="meta-item col-span-2"></div>
       </div>
 
     </div>
@@ -221,7 +263,58 @@
       return match ? decodeURIComponent(match[1]) : "";
     }
 
+    async function loadPrivacySettings() {
+      const status = document.getElementById("privacyStatus");
+      status.textContent = "Loading settings…";
+      try {
+        const res = await fetch("/api/settings/privacy");
+        if (!res.ok) throw new Error(`Server error (${res.status})`);
+        const data = await res.json();
+        document.getElementById("privacyAi").checked = !!data.ai_descriptions_enabled;
+        document.getElementById("privacyOcr").checked = !!data.ocr_enabled;
+        document.getElementById("privacyFaces").checked = !!data.face_recognition_enabled;
+        document.getElementById("privacyOriginals").checked = !!data.store_originals_enabled;
+        document.getElementById("privacyRetention").value = data.retention_days ? String(data.retention_days) : "";
+        status.textContent = "";
+      } catch (e) {
+        status.textContent = "Could not load privacy settings.";
+      }
+    }
+
+    let _privacySaveTimer = null;
+    function schedulePrivacySave() {
+      clearTimeout(_privacySaveTimer);
+      _privacySaveTimer = setTimeout(savePrivacySettings, 250);
+    }
+
+    async function savePrivacySettings() {
+      const csrfToken = getCsrfToken();
+      const status = document.getElementById("privacyStatus");
+      status.textContent = "Saving…";
+      try {
+        const body = {
+          ai_descriptions_enabled: document.getElementById("privacyAi").checked,
+          ocr_enabled: document.getElementById("privacyOcr").checked,
+          face_recognition_enabled: document.getElementById("privacyFaces").checked,
+          store_originals_enabled: document.getElementById("privacyOriginals").checked,
+          retention_days: document.getElementById("privacyRetention").value,
+        };
+        const res = await fetch("/api/settings/privacy", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+        status.textContent = "Saved.";
+        setTimeout(() => { if (status.textContent === "Saved.") status.textContent = ""; }, 1200);
+      } catch (e) {
+        status.textContent = e.message || "Save failed.";
+      }
+    }
+
     let currentPhotoId = null;
+    let _processingTimer = null;
 
     // ── Search debounce ──────────────────────────────────────
     let _searchTimer = null;
@@ -229,6 +322,12 @@
       clearTimeout(_searchTimer);
       _searchTimer = setTimeout(loadGallery, 300);
     });
+
+    document.getElementById("privacyAi").addEventListener("change", schedulePrivacySave);
+    document.getElementById("privacyOcr").addEventListener("change", schedulePrivacySave);
+    document.getElementById("privacyFaces").addEventListener("change", schedulePrivacySave);
+    document.getElementById("privacyOriginals").addEventListener("change", schedulePrivacySave);
+    document.getElementById("privacyRetention").addEventListener("input", schedulePrivacySave);
 
     // ── Gallery ──────────────────────────────────────────────
     async function loadGallery() {
@@ -294,6 +393,8 @@
       }
     }
 
+    loadPrivacySettings();
+
     // ── Lightbox ─────────────────────────────────────────────
     let _currentMeta = null;
     let _facesVisible = true;
@@ -332,6 +433,243 @@
           if (img.complete) _onLightboxImageLoad();
         }
       } catch (e) { /* metadata is optional */ }
+
+      // Fetch share links (best-effort)
+      loadShareLinks(photoId);
+
+      // Fetch ACL sharing (best-effort)
+      loadAcl(photoId);
+
+      startProcessingPoll(photoId);
+    }
+
+    function startProcessingPoll(photoId) {
+      const badge = document.getElementById("processingBadge");
+      if (_processingTimer) {
+        clearInterval(_processingTimer);
+        _processingTimer = null;
+      }
+      async function tick() {
+        try {
+          const res = await fetch(`/api/photos/status?photo_id=${photoId}`);
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error();
+          const status = String(data.status || "none");
+          const processing = status === "queued" || status === "running";
+          badge.classList.toggle("hidden", !processing);
+          if (!processing) {
+            clearInterval(_processingTimer);
+            _processingTimer = null;
+            await refreshLightboxInfo(photoId);
+          }
+        } catch (e) {
+          // Ignore transient failures.
+        }
+      }
+      tick();
+      _processingTimer = setInterval(tick, 2000);
+    }
+
+    async function refreshLightboxInfo(photoId) {
+      try {
+        const res = await fetch(`/api/photos/info?photo_id=${photoId}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) return;
+        const caption = data.description || data.filename || "";
+        document.getElementById("lightboxCaption").textContent = caption;
+      } catch (e) {
+        // optional
+      }
+    }
+
+    async function loadShareLinks(photoId) {
+      const host = document.getElementById("metaShares");
+      host.innerHTML = `<div class="meta-label">Share Links</div><div class="meta-value">Loading…</div>`;
+      try {
+        const res = await fetch(`/api/photos/shares?photo_id=${photoId}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+        const shares = Array.isArray(data.shares) ? data.shares : [];
+        if (shares.length === 0) {
+          host.innerHTML = `<div class="meta-label">Share Links</div><div class="meta-value">None</div>`;
+          return;
+        }
+        const rows = shares.map((s) => {
+          const expired = s.expires_at ? `expires ${s.expires_at}` : "no expiry";
+          const revoked = s.revoked_at ? `revoked ${s.revoked_at}` : "";
+          const status = revoked || expired;
+          const disabled = !!s.revoked_at;
+          return `
+            <div class="flex items-center justify-between gap-3 py-1">
+              <div class="text-xs text-white/80 font-mono">${s.token_prefix}</div>
+              <div class="text-[11px] text-white/60 truncate flex-1">${status}</div>
+              <button data-prefix="${s.token_prefix}" ${disabled ? "disabled" : ""}
+                      class="revoke-share px-2 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20 disabled:opacity-50 disabled:pointer-events-none">
+                Revoke
+              </button>
+            </div>
+          `;
+        }).join("");
+        host.innerHTML = `
+          <div class="flex items-center justify-between mb-2">
+            <div class="meta-label">Share Links</div>
+            <button id="revokeAllShares"
+                    class="px-2 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20">
+              Revoke all
+            </button>
+          </div>
+          <div class="space-y-1">${rows}</div>
+        `;
+        host.querySelectorAll(".revoke-share").forEach((btn) => {
+          btn.addEventListener("click", async (e) => {
+            const prefix = e.currentTarget.getAttribute("data-prefix") || "";
+            await revokeShare(photoId, prefix);
+            loadShareLinks(photoId);
+          });
+        });
+        const revokeAll = host.querySelector("#revokeAllShares");
+        if (revokeAll) {
+          revokeAll.addEventListener("click", async () => {
+            await revokeShare(photoId, null);
+            loadShareLinks(photoId);
+          });
+        }
+      } catch (e) {
+        host.innerHTML = `<div class="meta-label">Share Links</div><div class="meta-value">Unavailable</div>`;
+      }
+    }
+
+    async function revokeShare(photoId, tokenPrefixOrNull) {
+      const csrfToken = getCsrfToken();
+      const body = { photo_id: photoId };
+      if (tokenPrefixOrNull) body.token_prefix = tokenPrefixOrNull;
+      const res = await fetch("/api/photos/share", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+      return data;
+    }
+
+    async function loadAcl(photoId) {
+      const host = document.getElementById("metaAcl");
+      host.innerHTML = `
+        <div class="meta-label">Shared With</div>
+        <div class="meta-value">Loading…</div>
+      `;
+      try {
+        const res = await fetch(`/api/photos/acl?photo_id=${photoId}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+        const acl = Array.isArray(data.acl) ? data.acl : [];
+        const rows = acl.map((a) => `
+          <div class="flex items-center justify-between gap-3 py-1">
+            <div class="text-xs text-white/80 truncate">${a.email || a.username || a.grantee_user_id}</div>
+            <button data-grantee="${a.grantee_user_id}"
+                    class="revoke-acl px-2 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20">
+              Remove
+            </button>
+          </div>
+        `).join("");
+        host.innerHTML = `
+          <div class="flex items-center justify-between mb-2">
+            <div class="meta-label">Shared With</div>
+          </div>
+          <div class="flex items-center gap-2 mb-2">
+            <input id="aclEmailInput" type="email" placeholder="email@example.com"
+                   class="flex-1 rounded-full bg-white/10 border border-white/20 text-white text-xs px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-orange-300" />
+            <button id="aclAddBtn"
+                    class="px-3 py-1.5 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs hover:bg-white/20">
+              Add
+            </button>
+          </div>
+          <div class="space-y-1">
+            ${rows || '<div class="text-[11px] text-white/60">Not shared with anyone.</div>'}
+          </div>
+        `;
+        const addBtn = host.querySelector("#aclAddBtn");
+        if (addBtn) {
+          addBtn.addEventListener("click", async () => {
+            const input = host.querySelector("#aclEmailInput");
+            const email = (input && input.value ? String(input.value) : "").trim();
+            if (!email) return;
+            try {
+              await grantAcl(photoId, email);
+              loadAcl(photoId);
+            } catch (e) {
+              showNotice({ title: "Share Failed", message: e.message || "Could not share photo." });
+            }
+          });
+        }
+        host.querySelectorAll(".revoke-acl").forEach((btn) => {
+          btn.addEventListener("click", async (e) => {
+            const grantee = e.currentTarget.getAttribute("data-grantee") || "";
+            try {
+              await revokeAcl(photoId, grantee);
+              loadAcl(photoId);
+            } catch (err) {
+              showNotice({ title: "Remove Failed", message: err.message || "Could not remove share." });
+            }
+          });
+        });
+      } catch (e) {
+        host.innerHTML = `<div class="meta-label">Shared With</div><div class="meta-value">Unavailable</div>`;
+      }
+    }
+
+    async function grantAcl(photoId, email) {
+      const csrfToken = getCsrfToken();
+      const res = await fetch("/api/photos/acl/grant", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ photo_id: photoId, email }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+      return data;
+    }
+
+    async function revokeAcl(photoId, granteeUserId) {
+      const csrfToken = getCsrfToken();
+      const res = await fetch("/api/photos/acl/revoke", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+        body: JSON.stringify({ photo_id: photoId, grantee_user_id: granteeUserId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+      return data;
+    }
+
+    async function shareCurrentPhoto() {
+      if (!currentPhotoId) return;
+      const btn = document.getElementById("shareBtn");
+      btn.disabled = true;
+      btn.classList.add("opacity-60", "pointer-events-none");
+      try {
+        const csrfToken = getCsrfToken();
+        const res = await fetch("/api/photos/share", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          body: JSON.stringify({ photo_id: currentPhotoId }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Server error (${res.status})`);
+        const shareUrl = data.share_url || "";
+        const absolute = `${window.location.origin}${shareUrl}`;
+        try { await navigator.clipboard.writeText(absolute); } catch (e) { /* optional */ }
+        showNotice({
+          title: "Share Link Created",
+          message: `Link copied (if supported): ${absolute}`,
+        });
+      } catch (e) {
+        showNotice({ title: "Share Failed", message: e.message || "Could not create share link." });
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove("opacity-60", "pointer-events-none");
+      }
     }
 
     function _onLightboxImageLoad() {
@@ -385,6 +723,7 @@
       btn.classList.add("opacity-50", "pointer-events-none");
       const label = btn.querySelector(".recaption-label");
       label.textContent = "Analyzing…";
+      const csrfToken = getCsrfToken();
 
       try {
         const res = await fetch("/api/photos/recaption", {
@@ -466,6 +805,11 @@
       _clearSvg(document.getElementById("faceOverlay"));
       document.getElementById("lightboxMeta").classList.add("hidden");
       document.body.style.overflow = "";
+      document.getElementById("processingBadge").classList.add("hidden");
+      if (_processingTimer) {
+        clearInterval(_processingTimer);
+        _processingTimer = null;
+      }
       currentPhotoId = null;
       _currentMeta = null;
     }
