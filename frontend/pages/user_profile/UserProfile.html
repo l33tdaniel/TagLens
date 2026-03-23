@@ -94,7 +94,7 @@
        class="hidden fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-sm"
        onclick="closeLightbox(event)">
 
-    <div class="relative max-w-5xl w-full mx-auto my-8 px-6" onclick="event.stopPropagation()">
+    <div class="relative max-w-5xl w-full mx-auto my-8 px-6 flex flex-col" onclick="event.stopPropagation()">
 
       <!-- Top bar -->
       <div class="flex items-center justify-between mb-3 px-1">
@@ -389,7 +389,7 @@
       try {
         const res = await fetch("/api/photos/recaption", {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken },
+          headers: { "Content-Type": "application/json", "X-CSRF-Token": getCsrfToken() },
           body: JSON.stringify({ photo_id: currentPhotoId }),
         });
         const data = await res.json();

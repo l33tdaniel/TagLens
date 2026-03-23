@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Search - Tag Lens</title>
+
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/tailwind.generated.css">
+</head>
+
+<body class="bg-creamsicle-bg min-h-screen flex flex-col">
+
+  <!-- HEADER -->
+  <header class="app-header px-10 py-6 flex items-center justify-between">
+
+    <div class="flex items-center gap-4">
+      <div class="w-10 h-10 rounded-full border border-orange-200 flex items-center justify-center font-semibold">
+        TL
+      </div>
+      <span class="text-lg font-medium tracking-tight">Tag Lens</span>
+    </div>
+
+    <nav class="flex items-center gap-4">
+      <a href="/dashboard"
+         class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">
+        Dashboard
+      </a>
+
+      <a href="/profile"
+         class="h-11 px-6 rounded-full border border-orange-200 bg-white/50 flex items-center text-sm font-medium hover:bg-orange-50 transition">
+        Profile
+      </a>
+
+      <a href="/search"
+         class="h-11 px-6 rounded-full border border-orange-200 bg-orange-100 flex items-center text-sm font-medium">
+        Search
+      </a>
+    </nav>
+
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-gray-600">{{ user.username }}</span>
+      <img src="/static/avatar.svg"
+           class="w-9 h-9 rounded-full border border-orange-200" />
+    </div>
+
+  </header>
+
+  <!-- MAIN -->
+  <main class="flex-grow flex flex-col items-center pt-24 px-6">
+
+    <div class="w-full text-center">
+
+      <h1 class="text-4xl md:text-5xl font-semibold mb-6 leading-tight">
+        Search Your Photos <br>
+        <span class="text-creamsicle-primary">with AI</span>
+      </h1>
+
+      <p class="text-gray-600 text-lg mb-12">
+        Try “sunset beach”, “friends at night”, or “dog running”
+      </p>
+
+      <!-- SEARCH BAR -->
+    <form class="w-full max-w-5xl mx-auto px-4">
+
+  <div class="bg-white/70 backdrop-blur
+            border border-orange-200
+            rounded-3xl
+            px-8 py-6
+            shadow-sm relative">
+
+    <input
+      type="text"
+      id="search"
+      placeholder="Search your photos..."
+      class="w-full
+            text-lg
+            bg-transparent
+            outline-none
+            border-none
+            ring-0
+            focus:ring-0
+            focus:outline-none
+            placeholder-gray-400
+            pr-28"
+      style="box-shadow: none;"
+    />
+
+    <button
+      type="button"
+      onclick="performSearch()"
+      class="absolute right-4 top-1/2 -translate-y-1/2
+             px-5 py-2
+             rounded-full
+             bg-orange-500 text-white
+             hover:bg-orange-600
+             transition"
+    >
+      Search
+    </button>
+
+  </div>
+
+</form>
+
+    <!-- RESULTS -->
+    <div class="w-full max-w-6xl mt-16">
+      <div id="resultsGrid"
+           class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    let _searchTimer = null;
+    const input = document.getElementById("search");
+
+    input.addEventListener("input", () => {
+      clearTimeout(_searchTimer);
+
+      _searchTimer = setTimeout(() => {
+        performSearch();
+      }, 300);
+    });
+
+    async function performSearch() {
+      const query = input.value.trim();
+      const grid = document.getElementById("resultsGrid");
+
+      if (!query) {
+        grid.innerHTML = "";
+        return;
+      }
+
+      grid.innerHTML = `
+        <p class="text-gray-400 col-span-full text-center">
+          Searching...
+        </p>
+      `;
+
+      try {
+        const res = await fetch(`/api/photos/search?q=${encodeURIComponent(query)}`);
+        const data = await res.json();
+        renderResults(data.photos);
+      } catch (err) {
+        grid.innerHTML = `
+          <p class="text-red-400 col-span-full text-center">
+            Search failed
+          </p>
+        `;
+      }
+    }
+
+    function renderResults(photos) {
+      const grid = document.getElementById("resultsGrid");
+      grid.innerHTML = "";
+
+      if (!photos || photos.length === 0) {
+        grid.innerHTML = `
+          <p class="text-gray-400 col-span-full text-center">
+            No results found
+          </p>
+        `;
+        return;
+      }
+
+      for (const photo of photos) {
+
+        const card = document.createElement("div");
+        card.className = "relative group rounded-xl overflow-hidden";
+
+        const img = document.createElement("img");
+        img.src = `/api/photos/thumb?photo_id=${photo.id}`;
+        img.className = "w-full h-64 object-cover rounded-xl transition group-hover:scale-105 duration-300";
+
+        const overlay = document.createElement("div");
+        overlay.className = "absolute inset-0 bg-black/0 group-hover:bg-black/20 transition";
+
+        const caption = document.createElement("div");
+        caption.className = "absolute bottom-0 left-0 right-0 text-white text-xs p-3 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition";
+        caption.textContent = photo.description || photo.filename;
+
+        card.appendChild(img);
+        card.appendChild(overlay);
+        card.appendChild(caption);
+
+        grid.appendChild(card);
+      }
+    }
+  </script>
+
+</body>
+</html>
