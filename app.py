@@ -11,6 +11,8 @@ Authorship (git history, mapped to real names):
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import hashlib
+import secrets
 from typing import Iterable, Optional, Tuple
 from urllib.parse import parse_qs, urlencode
 from urllib import error as urllib_error, request as urllib_request
@@ -54,7 +56,7 @@ from auth import (
     verify_csrf_token,
     verify_password,
 )
-from database import Database, SessionRecord, UserRecord
+from database import Database, JobRecord, SessionRecord, UserRecord
 from scripts.insightface_tagging import (
     detect_and_tag_faces_for_user,
     public_faces_payload,
@@ -109,6 +111,20 @@ BUCKET_NAME = os.getenv("BUCKET_NAME")
 bucket = None
 
 
+def _env_truthy(name: str) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+ASYNC_PROCESSING = _env_truthy("TAGLENS_ASYNC_PROCESSING")
+IMAGE_PROCESS_JOB_KIND = "process_image"
+ENABLE_RETENTION = _env_truthy("TAGLENS_ENABLE_RETENTION")
+DIRECT_B2_UPLOAD = _env_truthy("TAGLENS_DIRECT_B2_UPLOAD")
+
+_signed_url_cache: dict[str, tuple[float, str]] = {}
+_signed_url_lock = threading.Lock()
+
+
 def _initialize_b2_bucket() -> None:
     """Initialize Backblaze bucket access when credentials are configured."""
     global bucket
@@ -131,6 +147,10 @@ async def _ensure_database() -> None:
     """Prepare the sqlite file before handling the first request."""
     await db.initialize()
     _initialize_b2_bucket()
+    if ASYNC_PROCESSING:
+        asyncio.create_task(_job_worker_loop())
+    if ENABLE_RETENTION:
+        asyncio.create_task(_retention_worker_loop())
 
 
 app.startup_handler(_ensure_database)
@@ -759,32 +779,59 @@ def _fetch_bucket_image_bytes(user_id: int, photo_id: int, filename: str) -> Opt
     if bucket is None:
         return None
     file_key = _photo_file_key(user_id, photo_id, filename)
-    auth_token = bucket.get_download_authorization(
-        file_key,
-        valid_duration_in_seconds=300,
-    )
-    download_base = bucket.get_download_url("")
-    signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
+    signed_url = _get_cached_signed_url(file_key, valid_duration_in_seconds=300)
     with urllib_request.urlopen(signed_url, timeout=30) as response:
         return response.read()
 
 
-def _photo_view_response(user_id: int, photo_id: int, record) -> Response:
-    """Return a response that serves the image or redirects to B2."""
+def _get_cached_signed_url(file_key: str, *, valid_duration_in_seconds: int) -> str:
+    if bucket is None:
+        raise RuntimeError("Storage unavailable")
+    now = time.monotonic()
+    with _signed_url_lock:
+        cached = _signed_url_cache.get(file_key)
+        if cached and cached[0] > now:
+            return cached[1]
+    auth_token = bucket.get_download_authorization(
+        file_key,
+        valid_duration_in_seconds=valid_duration_in_seconds,
+    )
+    download_base = bucket.get_download_url("")
+    signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
+    # Cache slightly shorter than token lifetime to avoid edge-of-expiry failures.
+    cache_expires = now + max(0, valid_duration_in_seconds - 15)
+    with _signed_url_lock:
+        _signed_url_cache[file_key] = (cache_expires, signed_url)
+    return signed_url
+
+
+def _photo_view_response(
+    user_id: int,
+    photo_id: int,
+    record,
+    *,
+    allow_thumbnail_fallback: bool = False,
+) -> Response:
+    """Return a response that serves the original image or redirects to B2."""
     if record.image_data:
         return Response(
             status_code=200,
             headers={"content-type": record.content_type},
             description=record.image_data,
         )
+    if allow_thumbnail_fallback and record.thumbnail_data:
+        return Response(
+            status_code=200,
+            headers={
+                "content-type": record.thumbnail_content_type or "image/webp",
+                "cache-control": "private, max-age=86400",
+            },
+            description=record.thumbnail_data,
+        )
     if bucket is None:
         return Response(status_code=503, headers={}, description="Storage unavailable")
     b2_key = _photo_file_key(user_id, photo_id, record.filename)
-    auth_token = bucket.get_download_authorization(
-        b2_key, valid_duration_in_seconds=300
-    )
-    download_base = bucket.get_download_url("")
-    signed_url = f"{download_base}{b2_key}?Authorization={auth_token}"
+    signed_url = _get_cached_signed_url(b2_key, valid_duration_in_seconds=300)
 
     return Response(
         status_code=302,
@@ -827,6 +874,179 @@ def _generate_image_description_with_ollama(
     if not description:
         return ""
     return f"{description}"
+
+
+async def _process_image_job(job: JobRecord) -> None:
+    payload: dict = {}
+    try:
+        payload = json.loads(job.payload_json) if job.payload_json else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    record = await db.fetch_image_for_user(job.image_id, job.user_id)
+    if not record:
+        raise RuntimeError("image not found")
+
+    image_bytes: Optional[bytes] = record.image_data
+    if image_bytes is None:
+        image_bytes = await asyncio.to_thread(
+            _fetch_bucket_image_bytes,
+            job.user_id,
+            job.image_id,
+            record.filename,
+        )
+    if not image_bytes:
+        raise RuntimeError("image bytes unavailable")
+
+    faces_json: Optional[str] = None
+    ocr_text: Optional[str] = None
+    ai_description: Optional[str] = None
+    taken_at: Optional[str] = None
+    thumbnail_data: Optional[bytes] = None
+
+    if payload.get("do_ocr") is True:
+        try:
+            extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
+            ocr_text = extracted.ocr_text
+            if record.taken_at is None and extracted.taken_at is not None:
+                taken_at = extracted.taken_at
+        except Exception:
+            logger.warning(
+                "job metadata extraction skipped user_id=%s image_id=%s",
+                job.user_id,
+                job.image_id,
+                exc_info=True,
+            )
+
+    if payload.get("do_ai") is True:
+        try:
+            ai_description = await asyncio.to_thread(
+                _generate_image_description_with_ollama,
+                image_bytes,
+                filename=record.filename,
+            )
+        except Exception:
+            logger.warning(
+                "job caption generation skipped user_id=%s image_id=%s",
+                job.user_id,
+                job.image_id,
+                exc_info=True,
+            )
+
+    if payload.get("do_faces") is True:
+        try:
+            faces = await detect_and_tag_faces_for_user(job.user_id, image_bytes, db)
+            faces_json = json.dumps(faces)
+        except Exception:
+            logger.warning(
+                "job face detection/tagging skipped user_id=%s image_id=%s",
+                job.user_id,
+                job.image_id,
+                exc_info=True,
+            )
+
+    if payload.get("do_thumb") is True:
+        try:
+            thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
+        except Exception:
+            logger.warning(
+                "job thumbnail generation skipped user_id=%s image_id=%s",
+                job.user_id,
+                job.image_id,
+                exc_info=True,
+            )
+
+    if thumbnail_data:
+        try:
+            await db.update_image_thumbnail(
+                job.image_id,
+                job.user_id,
+                thumbnail_data,
+                "image/webp",
+            )
+        except Exception:
+            logger.warning(
+                "job thumbnail update skipped user_id=%s image_id=%s",
+                job.user_id,
+                job.image_id,
+                exc_info=True,
+            )
+
+    await db.update_image_processing_fields(
+        image_id=job.image_id,
+        user_id=job.user_id,
+        faces_json=faces_json,
+        ocr_text=ocr_text,
+        ai_description=ai_description,
+        taken_at=taken_at,
+    )
+
+
+async def _job_worker_loop() -> None:
+    logger.info("job worker enabled kind=%s", IMAGE_PROCESS_JOB_KIND)
+    while True:
+        job = await db.claim_next_job(kind=IMAGE_PROCESS_JOB_KIND)
+        if not job:
+            await asyncio.sleep(0.5)
+            continue
+        try:
+            await _process_image_job(job)
+            await db.complete_job(job.id)
+        except Exception as exc:
+            logger.exception("job failed id=%s kind=%s", job.id, job.kind)
+            await db.fail_job(job.id, str(exc))
+
+
+async def _retention_worker_loop() -> None:
+    logger.info("retention worker enabled")
+    while True:
+        try:
+            await _run_retention_cleanup_once()
+        except Exception:
+            logger.exception("retention cleanup failed")
+        # Run periodically; keep lightweight.
+        await asyncio.sleep(6 * 60 * 60)
+
+
+async def _run_retention_cleanup_once() -> None:
+    users = await db.list_users_with_retention()
+    if not users:
+        return
+    now = _utc_now()
+    for user_id, retention_days in users:
+        cutoff = (now - timedelta(days=int(retention_days))).isoformat()
+        while True:
+            refs = await db.list_image_file_refs_older_than(
+                user_id=user_id,
+                cutoff_iso=cutoff,
+                limit=200,
+            )
+            if not refs:
+                break
+            image_ids = [image_id for image_id, _ in refs]
+            deleted = await db.delete_images_by_ids(user_id=user_id, image_ids=image_ids)
+            if bucket is not None:
+                for image_id, filename in refs:
+                    try:
+                        file_key = _photo_file_key(user_id, image_id, filename)
+                        file_version = await asyncio.to_thread(bucket.get_file_info_by_name, file_key)
+                        await asyncio.to_thread(
+                            bucket.delete_file_version,
+                            file_version.id_,
+                            file_version.file_name,
+                        )
+                    except Exception:
+                        logger.info(
+                            "retention storage cleanup skipped user_id=%s image_id=%s",
+                            user_id,
+                            image_id,
+                        )
+            logger.info(
+                "retention cleanup user_id=%s deleted=%s cutoff=%s",
+                user_id,
+                deleted,
+                cutoff,
+            )
 
 
 def _redirect_with_next(path: str, *, query: Optional[str] = None) -> Response:
@@ -1036,13 +1256,31 @@ async def profile_api(request: Request) -> Response:
     user = auth.user
     sort_by = str(request.query_params.get("sort_by", "uploaded")).strip().lower()
     order = str(request.query_params.get("order", "desc")).strip().lower()
+    raw_limit = request.query_params.get("limit", None)
+    raw_offset = request.query_params.get("offset", None)
+    limit: Optional[int] = None
+    offset = 0
     if sort_by not in {"uploaded", "taken"}:
         return _json_response(
             {"error": "sort_by must be uploaded or taken"}, status=400
         )
     if order not in {"asc", "desc"}:
         return _json_response({"error": "order must be asc or desc"}, status=400)
-    images = await db.list_images_for_user(user.id, sort_by=sort_by, order=order)
+    if raw_limit is not None:
+        raw_limit_str = str(raw_limit).strip()
+        if not raw_limit_str.isdigit():
+            return _json_response({"error": "limit must be an integer"}, status=400)
+        limit = int(raw_limit_str)
+        if limit < 1 or limit > 500:
+            return _json_response({"error": "limit must be 1..500"}, status=400)
+    if raw_offset is not None:
+        raw_offset_str = str(raw_offset).strip()
+        if not raw_offset_str.isdigit():
+            return _json_response({"error": "offset must be an integer"}, status=400)
+        offset = int(raw_offset_str)
+    images = await db.list_images_for_user(
+        user.id, sort_by=sort_by, order=order, limit=limit, offset=offset
+    )
     logger.info(
         "profile photos listed user_id=%s count=%s sort_by=%s order=%s",
         user.id,
@@ -1069,6 +1307,395 @@ async def profile_api(request: Request) -> Response:
             ],
         }
     )
+
+
+def _payload_optional_bool(payload: dict, key: str) -> Optional[bool]:
+    if key not in payload:
+        return None
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(f"{key} must be a boolean")
+
+
+@app.get("/api/settings/privacy")
+async def privacy_settings_get(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    settings = await db.ensure_user_settings(auth.user.id)
+    return _json_response(
+        {
+            "ai_descriptions_enabled": bool(settings.ai_descriptions_enabled),
+            "ocr_enabled": bool(settings.ocr_enabled),
+            "face_recognition_enabled": bool(settings.face_recognition_enabled),
+            "store_originals_enabled": bool(settings.store_originals_enabled),
+            "retention_days": settings.retention_days,
+        }
+    )
+
+
+@app.put("/api/settings/privacy")
+async def privacy_settings_put(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    payload = _json_data(request)
+    try:
+        ai_enabled = _payload_optional_bool(payload, "ai_descriptions_enabled")
+        ocr_enabled = _payload_optional_bool(payload, "ocr_enabled")
+        faces_enabled = _payload_optional_bool(payload, "face_recognition_enabled")
+        originals_enabled = _payload_optional_bool(payload, "store_originals_enabled")
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status=400)
+    retention_days = payload.get("retention_days", None)
+    if retention_days is not None:
+        if retention_days == "":
+            retention_days = None
+        if retention_days is not None:
+            if isinstance(retention_days, str) and retention_days.strip().isdigit():
+                retention_days = int(retention_days.strip())
+            if not isinstance(retention_days, int) or retention_days < 1:
+                return _json_response(
+                    {"error": "retention_days must be a positive integer"},
+                    status=400,
+                )
+    settings = await db.update_user_settings(
+        auth.user.id,
+        ai_descriptions_enabled=ai_enabled,
+        ocr_enabled=ocr_enabled,
+        face_recognition_enabled=faces_enabled,
+        store_originals_enabled=originals_enabled,
+        retention_days=retention_days,
+    )
+    return _json_response(
+        {
+            "ai_descriptions_enabled": bool(settings.ai_descriptions_enabled),
+            "ocr_enabled": bool(settings.ocr_enabled),
+            "face_recognition_enabled": bool(settings.face_recognition_enabled),
+            "store_originals_enabled": bool(settings.store_originals_enabled),
+            "retention_days": settings.retention_days,
+        }
+    )
+
+
+async def _handle_photo_upload(
+    *,
+    request: Request,
+    auth: AuthContext,
+    filename: str,
+    image_bytes: bytes,
+    content_type: str,
+    taken_at: Optional[str],
+) -> Response:
+    if not image_bytes:
+        logger.warning(
+            "upload rejected user_id=%s filename=%s reason=empty_payload",
+            auth.user.id,
+            filename,
+        )
+        return _json_response({"error": "empty image payload"}, status=400)
+    MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        logger.warning(
+            "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
+            auth.user.id,
+            filename,
+            len(image_bytes),
+        )
+        return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
+    logger.info(
+        "upload started user_id=%s filename=%s bytes=%s content_type=%s",
+        auth.user.id,
+        filename,
+        len(image_bytes),
+        content_type,
+    )
+
+    user_settings = await db.ensure_user_settings(auth.user.id)
+    do_ocr = bool(user_settings.ocr_enabled)
+    do_ai = bool(user_settings.ai_descriptions_enabled)
+    do_faces = bool(user_settings.face_recognition_enabled)
+    store_originals = bool(user_settings.store_originals_enabled)
+
+    ocr_text = ""
+    if do_ocr and not ASYNC_PROCESSING:
+        try:
+            extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
+            if taken_at is None:
+                taken_at = extracted.taken_at
+            ocr_text = extracted.ocr_text
+        except Exception:
+            logger.warning(
+                "upload metadata extraction skipped user_id=%s filename=%s",
+                auth.user.id,
+                filename,
+                exc_info=True,
+            )
+
+    thumbnail_data: Optional[bytes] = None
+    try:
+        thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
+    except Exception:
+        logger.warning(
+            "upload thumbnail generation skipped user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+            exc_info=True,
+        )
+
+    description = ""
+    if do_ai and not ASYNC_PROCESSING:
+        try:
+            description = await asyncio.to_thread(
+                _generate_image_description_with_ollama,
+                image_bytes,
+                filename=filename,
+            )
+        except Exception:
+            logger.warning(
+                "upload caption generation skipped user_id=%s filename=%s",
+                auth.user.id,
+                filename,
+                exc_info=True,
+            )
+
+    faces_json = "[]"
+    if do_faces and not ASYNC_PROCESSING:
+        try:
+            faces = await detect_and_tag_faces_for_user(auth.user.id, image_bytes, db)
+            faces_json = json.dumps(faces)
+        except Exception:
+            logger.warning(
+                "upload face detection/tagging skipped user_id=%s filename=%s",
+                auth.user.id,
+                filename,
+                exc_info=True,
+            )
+
+    try:
+        # Insert metadata first to get photo_id.
+        # Keep blob data only when B2 is unavailable.
+        image_blob = image_bytes if (bucket is None and store_originals) else None
+        saved = await db.create_image_metadata(
+            filename=filename,
+            faces_json=faces_json,
+            ocr_text=ocr_text,
+            user_id=auth.user.id,
+            ai_description=description,
+            content_type=content_type,
+            image_data=image_blob,
+            thumbnail_data=thumbnail_data,
+            thumbnail_content_type="image/webp",
+            taken_at=taken_at,
+        )
+    except Exception:
+        logger.exception(
+            "upload database write failed user_id=%s filename=%s",
+            auth.user.id,
+            filename,
+        )
+        return _json_response({"error": "upload failed unexpectedly"}, status=500)
+
+    try:
+        photo_id = saved.id
+        if bucket is not None and store_originals:
+            ext = pathlib.Path(filename).suffix.lower()
+            b2_key = f"{auth.user.id}/{photo_id}{ext}"
+            await asyncio.to_thread(
+                bucket.upload_bytes,
+                image_bytes,
+                b2_key,
+                content_type=content_type,
+            )
+        if ASYNC_PROCESSING and (do_ocr or do_ai or do_faces):
+            await db.enqueue_job(
+                user_id=auth.user.id,
+                image_id=photo_id,
+                kind=IMAGE_PROCESS_JOB_KIND,
+                payload_json=json.dumps(
+                    {"do_ocr": do_ocr, "do_ai": do_ai, "do_faces": do_faces},
+                    separators=(",", ":"),
+                ),
+            )
+    except Exception:
+        logger.exception(
+            "upload file storage failed user_id=%s photo_id=%s filename=%s",
+            auth.user.id,
+            saved.id,
+            filename,
+        )
+        try:
+            await db.delete_image_for_user(saved.id, auth.user.id)
+            logger.info("rolled back orphaned DB record photo_id=%s", saved.id)
+        except Exception:
+            logger.exception("rollback failed for photo_id=%s", saved.id)
+        return _json_response({"error": "upload failed unexpectedly"}, status=500)
+
+    logger.info(
+        "upload completed user_id=%s photo_id=%s filename=%s",
+        auth.user.id,
+        saved.id,
+        filename,
+    )
+    return _json_response(
+        {
+            "id": saved.id,
+            "filename": saved.filename,
+            "created_at": saved.created_at,
+            "taken_at": saved.taken_at,
+            "description": saved.ai_description,
+            "faces": public_faces_payload(saved.faces_json),
+            "processing": ASYNC_PROCESSING and (do_ocr or do_ai or do_faces),
+            "stored_original": store_originals,
+        },
+        status=201,
+    )
+
+
+@app.post("/api/photos/raw")
+async def upload_photo_raw_api(request: Request) -> Response:
+    """Upload photo bytes directly (no base64) via request body."""
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    if not _allow_rate_limited_request(_upload_limiter, request):
+        return _json_response({"error": "too many uploads, try again later"}, status=429)
+
+    raw_filename = str(request.query_params.get("filename", "")).strip()
+    filename = os.path.basename(raw_filename)
+    filename = re.sub(r"[^\w.\-() ]", "_", filename).strip()
+    if not filename:
+        filename = "upload"
+    taken_at = _parse_taken_at(request.query_params.get("taken_at"))
+    content_type = _normalize_content_type(
+        str(request.headers.get("content-type", "")),
+        filename,
+    )
+    image_bytes = _raw_body_bytes(request)
+    return await _handle_photo_upload(
+        request=request,
+        auth=auth,
+        filename=filename,
+        image_bytes=image_bytes,
+        content_type=content_type,
+        taken_at=taken_at,
+    )
+
+
+def _b2_get_upload_url() -> tuple[str, str]:
+    if bucket is None:
+        raise RuntimeError("Storage unavailable")
+    api = bucket.api
+    api_url = api.account_info.get_api_url()
+    account_auth_token = api.account_info.get_account_auth_token()
+    result = api.session.raw_api.get_upload_url(api_url, account_auth_token, bucket.id_)
+    return str(result["uploadUrl"]), str(result["authorizationToken"])
+
+
+@app.post("/api/uploads/b2/init")
+async def b2_upload_init_api(request: Request) -> Response:
+    """Initialize a browser-direct upload to Backblaze B2 (requires CORS on bucket)."""
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    if not _allow_rate_limited_request(_upload_limiter, request):
+        return _json_response({"error": "too many uploads, try again later"}, status=429)
+    if not DIRECT_B2_UPLOAD:
+        return _json_response({"error": "direct uploads are disabled"}, status=403)
+    if bucket is None:
+        return _json_response({"error": "file storage unavailable"}, status=503)
+
+    user_settings = await db.ensure_user_settings(auth.user.id)
+    if not bool(user_settings.store_originals_enabled):
+        return _json_response({"error": "store originals is disabled in privacy settings"}, status=400)
+
+    payload = _json_data(request)
+    raw_filename = str(payload.get("filename", "")).strip()
+    filename = os.path.basename(raw_filename)
+    filename = re.sub(r"[^\w.\-() ]", "_", filename).strip()
+    if not filename:
+        filename = "upload"
+    taken_at = _parse_taken_at(payload.get("taken_at"))
+    content_type = _normalize_content_type(str(payload.get("content_type", "")), filename)
+
+    saved = await db.create_image_metadata(
+        filename=filename,
+        faces_json="[]",
+        ocr_text="",
+        user_id=auth.user.id,
+        ai_description="",
+        content_type=content_type,
+        image_data=None,
+        thumbnail_data=None,
+        thumbnail_content_type="image/webp",
+        taken_at=taken_at,
+    )
+    file_key = _photo_file_key(auth.user.id, saved.id, saved.filename)
+    try:
+        upload_url, upload_token = await asyncio.to_thread(_b2_get_upload_url)
+    except Exception:
+        logger.exception("b2 upload init failed user_id=%s photo_id=%s", auth.user.id, saved.id)
+        await db.delete_image_for_user(saved.id, auth.user.id)
+        return _json_response({"error": "could not initialize upload"}, status=500)
+    return _json_response(
+        {
+            "photo_id": saved.id,
+            "file_key": file_key,
+            "upload_url": upload_url,
+            "authorization_token": upload_token,
+            "content_type": content_type,
+        },
+        status=201,
+    )
+
+
+@app.post("/api/uploads/b2/complete")
+async def b2_upload_complete_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    if not DIRECT_B2_UPLOAD:
+        return _json_response({"error": "direct uploads are disabled"}, status=403)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+
+    user_settings = await db.ensure_user_settings(auth.user.id)
+    do_ocr = bool(user_settings.ocr_enabled)
+    do_ai = bool(user_settings.ai_descriptions_enabled)
+    do_faces = bool(user_settings.face_recognition_enabled)
+    await db.enqueue_job(
+        user_id=auth.user.id,
+        image_id=photo_id,
+        kind=IMAGE_PROCESS_JOB_KIND,
+        payload_json=json.dumps(
+            {"do_ocr": do_ocr, "do_ai": do_ai, "do_faces": do_faces, "do_thumb": True},
+            separators=(",", ":"),
+        ),
+    )
+    return _json_response({"status": "queued", "photo_id": photo_id})
 
 
 @app.post("/api/photos")
@@ -1113,66 +1740,14 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
         )
         return _json_response({"error": "invalid image_base64 payload"}, status=400)
-    if not image_bytes:
-        logger.warning(
-            "upload rejected user_id=%s filename=%s reason=empty_payload",
-            auth.user.id,
-            filename,
-        )
-        return _json_response({"error": "empty image payload"}, status=400)
-    MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-    if len(image_bytes) > MAX_UPLOAD_BYTES:
-        logger.warning(
-            "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
-            auth.user.id,
-            filename,
-            len(image_bytes),
-        )
-        return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
-    logger.info(
-        "upload started user_id=%s filename=%s bytes=%s content_type=%s",
-        auth.user.id,
-        filename,
-        len(image_bytes),
-        content_type,
+    return await _handle_photo_upload(
+        request=request,
+        auth=auth,
+        filename=filename,
+        image_bytes=image_bytes,
+        content_type=content_type,
+        taken_at=taken_at,
     )
-    ocr_text = ""
-    try:
-        extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
-        if taken_at is None:
-            taken_at = extracted.taken_at
-        ocr_text = extracted.ocr_text
-    except Exception:
-        logger.warning(
-            "upload metadata extraction skipped user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-            exc_info=True,
-        )
-    thumbnail_data: Optional[bytes] = None
-    try:
-        thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
-    except Exception:
-        logger.warning(
-            "upload thumbnail generation skipped user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-            exc_info=True,
-        )
-    try:
-        # 1. Generate caption
-        description = await asyncio.to_thread(
-            _generate_image_description_with_ollama,
-            image_bytes,
-            filename=filename,
-        )
-    except Exception:
-        logger.exception(
-            "upload caption generation failed user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-        )
-        return _json_response({"error": "upload failed unexpectedly"}, status=500)
 
     faces_json = "[]"
     try:
@@ -1207,68 +1782,68 @@ async def upload_photo_api(request: Request) -> Response:
         except Exception:
             pass
 
-    try:
-        # 2. Insert metadata first to get photo_id.
-        # Keep blob data only when B2 is unavailable.
-        image_blob = image_bytes if bucket is None else None
-        saved = await db.create_image_metadata(
-            filename=filename,
-            faces_json=faces_json,
-            ocr_text=ocr_text,
-            user_id=auth.user.id,
-            ai_description=description,
-            content_type=content_type,
-            image_data=image_blob,
-            thumbnail_data=thumbnail_data,
-            thumbnail_content_type="image/webp",
-            taken_at=taken_at,
-        )
-    except Exception:
-        logger.exception(
-            "upload database write failed user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-        )
-        return _json_response({"error": "upload failed unexpectedly"}, status=500)
+def _sha256_hex(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
+
+def _parse_expires_in_seconds(payload: dict) -> Optional[int]:
+    raw = payload.get("expires_in_seconds", None)
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, int):
+        seconds = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        seconds = int(raw.strip())
+    else:
+        raise ValueError("expires_in_seconds must be an integer")
+    if seconds < 60 or seconds > 60 * 60 * 24 * 30:
+        raise ValueError("expires_in_seconds must be 60..2592000 (30 days)")
+    return seconds
+
+
+@app.post("/api/photos/share")
+async def create_share_link_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
     try:
-        photo_id = saved.id
-        if bucket is not None:
-            ext = pathlib.Path(filename).suffix.lower()
-            b2_key = f"{auth.user.id}/{photo_id}{ext}"
-            await asyncio.to_thread(
-                bucket.upload_bytes,
-                image_bytes,
-                b2_key,
-                content_type=content_type,
-            )
-    except Exception:
-        logger.exception(
-            "upload file storage failed user_id=%s photo_id=%s filename=%s",
-            auth.user.id,
-            saved.id,
-            filename,
+        expires_in = _parse_expires_in_seconds(payload)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)}, status=400)
+    expires_at = None
+    if expires_in is None:
+        expires_at = (_utc_now() + timedelta(days=1)).isoformat()
+    else:
+        expires_at = (_utc_now() + timedelta(seconds=expires_in)).isoformat()
+    token = secrets.token_urlsafe(32)
+    token_hash = _sha256_hex(token)
+    token_prefix = token[:8]
+    try:
+        share = await db.create_photo_share(
+            image_id=photo_id,
+            token_hash=token_hash,
+            token_prefix=token_prefix,
+            expires_at=expires_at,
         )
-        try:
-            await db.delete_image_for_user(saved.id, auth.user.id)
-            logger.info("rolled back orphaned DB record photo_id=%s", saved.id)
-        except Exception:
-            logger.exception("rollback failed for photo_id=%s", saved.id)
-        return _json_response({"error": "upload failed unexpectedly"}, status=500)
-    logger.info(
-        "upload completed user_id=%s photo_id=%s filename=%s",
-        auth.user.id,
-        saved.id,
-        filename,
-    )
+    except Exception:
+        logger.exception("share create failed user_id=%s photo_id=%s", auth.user.id, photo_id)
+        return _json_response({"error": "could not create share link"}, status=500)
     return _json_response(
         {
-            "id": saved.id,
-            "filename": saved.filename,
-            "created_at": saved.created_at,
-            "taken_at": saved.taken_at,
-            "description": saved.ai_description,
-            "faces": public_faces_payload(saved.faces_json),
+            "photo_id": photo_id,
+            "token_prefix": share.token_prefix,
+            "expires_at": share.expires_at,
+            "share_url": f"/s?token={token}",
         },
         status=201,
     )
@@ -1365,6 +1940,232 @@ async def photo_metadata_api(request: Request) -> Response:
     })
 
 
+@app.get("/api/photos/shares")
+async def list_share_links_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    photo_id_raw = str(request.query_params.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    shares = await db.list_photo_shares_for_image(photo_id)
+    return _json_response(
+        {
+            "photo_id": photo_id,
+            "shares": [
+                {
+                    "token_prefix": s.token_prefix,
+                    "created_at": s.created_at,
+                    "expires_at": s.expires_at,
+                    "revoked_at": s.revoked_at,
+                }
+                for s in shares
+            ],
+        }
+    )
+
+
+@app.delete("/api/photos/share")
+async def revoke_share_links_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    token_prefix = payload.get("token_prefix", None)
+    if token_prefix is not None:
+        token_prefix = str(token_prefix).strip()
+        if not token_prefix:
+            token_prefix = None
+    changed = await db.revoke_photo_shares(image_id=photo_id, token_prefix=token_prefix)
+    return _json_response({"photo_id": photo_id, "revoked": changed})
+
+
+@app.get("/s")
+async def shared_photo_view(request: Request) -> Response:
+    """Public view route for share links: /s?token=..."""
+    token = str(request.query_params.get("token", "")).strip()
+    if not token:
+        return Response(status_code=400, headers={}, description="Missing token")
+    share = await db.fetch_photo_share_by_token_hash(_sha256_hex(token))
+    if not share:
+        return Response(status_code=404, headers={}, description="Not found")
+    if share.revoked_at is not None:
+        return Response(status_code=404, headers={}, description="Not found")
+    if share.expires_at and _as_utc(datetime.fromisoformat(share.expires_at)) <= _utc_now():
+        return Response(status_code=404, headers={}, description="Not found")
+    record = await db.fetch_image_by_id(share.image_id)
+    if not record:
+        return Response(status_code=404, headers={}, description="Not found")
+    if record.user_id is None and not record.image_data and not record.thumbnail_data:
+        return Response(status_code=404, headers={}, description="Not found")
+    owner_id = int(record.user_id) if record.user_id is not None else 0
+    return _photo_view_response(owner_id, record.id, record, allow_thumbnail_fallback=True)
+
+
+@app.post("/api/photos/acl/grant")
+async def grant_photo_acl_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    email = str(payload.get("email", "")).strip().lower()
+    if not email:
+        return _json_response({"error": "email is required"}, status=400)
+    user = await db.fetch_user_by_email(email)
+    if not user:
+        return _json_response({"error": "user not found"}, status=404)
+    if user.id == auth.user.id:
+        return _json_response({"error": "cannot share with yourself"}, status=400)
+    await db.grant_photo_acl(image_id=photo_id, grantee_user_id=user.id)
+    acl = await db.list_photo_acl_with_users(image_id=photo_id)
+    return _json_response({"photo_id": photo_id, "acl": acl})
+
+
+@app.delete("/api/photos/acl/revoke")
+async def revoke_photo_acl_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    if not _verify_api_csrf(request):
+        return _json_response({"error": "CSRF validation failed"}, status=403)
+    payload = _json_data(request)
+    photo_id_raw = str(payload.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    grantee_raw = str(payload.get("grantee_user_id", "")).strip()
+    if not grantee_raw.isdigit():
+        return _json_response({"error": "grantee_user_id must be an integer"}, status=400)
+    grantee_user_id = int(grantee_raw)
+    changed = await db.revoke_photo_acl(image_id=photo_id, grantee_user_id=grantee_user_id)
+    acl = await db.list_photo_acl_with_users(image_id=photo_id)
+    return _json_response({"photo_id": photo_id, "revoked": changed, "acl": acl})
+
+
+@app.get("/api/photos/acl")
+async def list_photo_acl_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    photo_id_raw = str(request.query_params.get("photo_id", "")).strip()
+    if not photo_id_raw.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(photo_id_raw)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    acl = await db.list_photo_acl_with_users(image_id=photo_id)
+    return _json_response({"photo_id": photo_id, "acl": acl})
+
+
+@app.get("/api/photos/shared-with-me")
+async def shared_with_me_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    raw_limit = str(request.query_params.get("limit", "100")).strip()
+    raw_offset = str(request.query_params.get("offset", "0")).strip()
+    if not raw_limit.isdigit() or not raw_offset.isdigit():
+        return _json_response({"error": "limit/offset must be integers"}, status=400)
+    limit = min(500, max(1, int(raw_limit)))
+    offset = max(0, int(raw_offset))
+    images = await db.list_shared_images_for_user(auth.user.id, limit=limit, offset=offset)
+    return _json_response(
+        {
+            "photos": [
+                {
+                    "id": record.id,
+                    "owner_user_id": record.user_id,
+                    "filename": record.filename,
+                    "created_at": record.created_at,
+                    "taken_at": record.taken_at,
+                    "description": record.ai_description,
+                }
+                for record in images
+            ]
+        }
+    )
+
+
+@app.get("/api/photos/info")
+async def photo_info_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
+    if not raw_photo_id.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(raw_photo_id)
+    record = await db.fetch_image_for_access(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    return _json_response(
+        {
+            "id": record.id,
+            "filename": record.filename,
+            "created_at": record.created_at,
+            "taken_at": record.taken_at,
+            "description": record.ai_description,
+            "ocr_text": record.ocr_text,
+            "faces": public_faces_payload(record.faces_json),
+            "thumbnail_present": bool(record.thumbnail_data),
+            "original_present": bool(record.image_data) or (bucket is not None and record.user_id is not None),
+        }
+    )
+
+
+@app.get("/api/photos/status")
+async def photo_status_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+    raw_photo_id = str(request.query_params.get("photo_id", "")).strip()
+    if not raw_photo_id.isdigit():
+        return _json_response({"error": "photo_id must be an integer"}, status=400)
+    photo_id = int(raw_photo_id)
+    record = await db.fetch_image_for_access(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
+    job = await db.fetch_latest_job_for_image(photo_id, kind=IMAGE_PROCESS_JOB_KIND)
+    if not job:
+        return _json_response({"photo_id": photo_id, "status": "none"})
+    return _json_response(
+        {
+            "photo_id": photo_id,
+            "status": job.status,
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "completed_at": job.completed_at,
+            "error": job.error,
+        }
+    )
+
+
 @app.get("/api/photos/download")
 async def download_photo_api(request: Request) -> Response:
     """Return base64 or signed URL for a stored photo."""
@@ -1378,7 +2179,7 @@ async def download_photo_api(request: Request) -> Response:
 
     photo_id = int(raw_photo_id)
 
-    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    record = await db.fetch_image_for_access(photo_id, auth.user.id)
     if not record:
         return _json_response({"error": "photo not found"}, status=404)
 
@@ -1392,13 +2193,9 @@ async def download_photo_api(request: Request) -> Response:
         )
     if bucket is None:
         return _json_response({"error": "file storage unavailable"}, status=503)
-    file_key = _photo_file_key(auth.user.id, photo_id, record.filename)
-    auth_token = bucket.get_download_authorization(
-        file_key,
-        valid_duration_in_seconds=300,
-    )
-    download_base = bucket.get_download_url("")
-    signed_url = f"{download_base}{file_key}?Authorization={auth_token}"
+    owner_id = int(record.user_id) if record.user_id is not None else auth.user.id
+    file_key = _photo_file_key(owner_id, photo_id, record.filename)
+    signed_url = _get_cached_signed_url(file_key, valid_duration_in_seconds=300)
     return _json_response(
         {
             "url": signed_url,
@@ -1418,11 +2215,12 @@ async def view_photo(request: Request) -> Response:
         return Response(status_code=400, headers={}, description="Invalid photo_id")
 
     photo_id = int(raw_photo_id)
-    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    record = await db.fetch_image_for_access(photo_id, auth.user.id)
     if not record:
         return Response(status_code=404, headers={}, description="Not found")
 
-    return _photo_view_response(auth.user.id, photo_id, record)
+    owner_id = int(record.user_id) if record.user_id is not None else auth.user.id
+    return _photo_view_response(owner_id, photo_id, record)
 
 @app.get("/api/photos/thumb")
 async def view_photo_thumbnail(request: Request) -> Response:
@@ -1435,7 +2233,7 @@ async def view_photo_thumbnail(request: Request) -> Response:
         return Response(status_code=400, headers={}, description="Invalid photo_id")
 
     photo_id = int(raw_photo_id)
-    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    record = await db.fetch_image_for_access(photo_id, auth.user.id)
     if not record:
         return Response(status_code=404, headers={}, description="Not found")
 
@@ -1492,7 +2290,8 @@ async def view_photo_thumbnail(request: Request) -> Response:
                 photo_id,
                 exc_info=True,
             )
-    return _photo_view_response(auth.user.id, photo_id, record)
+    owner_id = int(record.user_id) if record.user_id is not None else auth.user.id
+    return _photo_view_response(owner_id, photo_id, record)
 
 
 @app.delete("/api/photos")
@@ -1513,6 +2312,9 @@ async def delete_photo_api(request: Request) -> Response:
         )
     photo_id = int(photo_id_raw)
     logger.info("delete requested user_id=%s photo_id=%s", auth.user.id, photo_id)
+    record = await db.fetch_image_for_user(photo_id, auth.user.id)
+    if not record:
+        return _json_response({"error": "photo not found"}, status=404)
     try:
         deleted = await db.delete_image_for_user(photo_id, auth.user.id)
     except Exception:
@@ -1529,6 +2331,22 @@ async def delete_photo_api(request: Request) -> Response:
             photo_id,
         )
         return _json_response({"error": "photo not found"}, status=404)
+    if bucket is not None and record.user_id is not None:
+        try:
+            file_key = _photo_file_key(auth.user.id, photo_id, record.filename)
+            file_version = await asyncio.to_thread(bucket.get_file_info_by_name, file_key)
+            await asyncio.to_thread(
+                bucket.delete_file_version,
+                file_version.id_,
+                file_version.file_name,
+            )
+        except Exception:
+            logger.warning(
+                "delete storage cleanup failed user_id=%s photo_id=%s",
+                auth.user.id,
+                photo_id,
+                exc_info=True,
+            )
     logger.info("delete completed user_id=%s photo_id=%s", auth.user.id, photo_id)
     return _json_response({"status": "deleted", "photo_id": photo_id})
 

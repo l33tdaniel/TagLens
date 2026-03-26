@@ -57,7 +57,13 @@ This repository contains a Robyn-based web app for user authentication, profile 
 - `GET /dashboard`, `GET /profile` – require an active session cookie and redirect to `/login` if missing.
 - `GET /api/profile` – returns JSON profile metadata and uploaded photos (requires session cookie). Supports `sort_by=uploaded|taken` and `order=asc|desc`.
 - `POST /api/photos` – accepts JSON `{ "filename": "...", "image_base64": "...", "content_type": "image/png", "taken_at": "ISO-8601" }`, stores metadata + binary payload, and adds an Ollama-generated description when available (requires session cookie).
+- `POST /api/photos/raw?filename=<name>&taken_at=<ISO-8601>` – uploads raw bytes (no base64) with `Content-Type: image/*` (requires session cookie).
 - `GET /api/photos/download?photo_id=<id>` – returns JSON with the photo metadata and base64 image payload for a single photo (requires session cookie).
+- `POST /api/photos/share` – creates a share link for a photo (requires session cookie).
+- `GET /s?token=<token>` – public share link view (token-based).
+- `POST /api/photos/acl/grant` – shares a photo with a specific user email (requires session cookie).
+- `GET /api/photos/acl?photo_id=<id>` – lists ACL shares for a photo (requires session cookie).
+- `GET /api/photos/shared-with-me` – lists photos shared to you (requires session cookie).
 - `DELETE /api/photos` – requires JSON `{ "photo_id": <id>, "confirm_delete": true }` and permanently deletes the photo (requires session cookie).
 - `POST /logout` – revokes the session cookie and sends you back to `/`.
 
@@ -75,6 +81,18 @@ This repository contains a Robyn-based web app for user authentication, profile 
   - `OLLAMA_MODEL` (default `llava`)
 - To reset the database, stop the server and delete `data/users.db` before restarting.
 - You can toggle secure cookies by setting `ROBYN_SECURE_COOKIES=1` in the environment (remember to run behind HTTPS when secure cookies are enabled).
+
+## Backups (SQLite)
+- Create a consistent backup (online backup API):
+  ```bash
+  source .venv/bin/activate
+  python scripts/backup_db.py
+  ```
+- Restore from a backup (destructive, overwrites the target DB path):
+  ```bash
+  source .venv/bin/activate
+  python scripts/restore_db.py --backup backups/taglens-<timestamp>.db --force
+  ```
 
 ## Image Processing (Faces + OCR)
 - Uploads now extract OCR text and EXIF `taken_at` metadata directly in the API path.
@@ -97,6 +115,20 @@ BUCKET_NAME=your_bucket_name
 ```
 
 `APP_KEY` is also accepted as an alias for `API_KEY`.
+
+### Browser-direct B2 uploads (optional)
+If you set `TAGLENS_DIRECT_B2_UPLOAD=1`, the dashboard will attempt to upload files directly from the browser to Backblaze B2 using a short-lived upload URL/token issued by the server.
+
+This requires configuring **B2 bucket CORS rules** to allow browser `POST` uploads to the returned `uploadUrl`, including request headers like `Authorization`, `X-Bz-File-Name`, `X-Bz-Content-Sha1`, and `Content-Type`. If CORS is not set up, the dashboard automatically falls back to server uploads (`/api/photos/raw`).
+
+### At-rest encryption (optional)
+If you set `TAGLENS_ENCRYPTION_KEY` (or `TAGLENS_ENCRYPTION_KEYS`), derived metadata fields (OCR text, AI descriptions, faces JSON, face embeddings) are stored encrypted in SQLite and transparently decrypted when read.
+
+Generate a key:
+```bash
+source .venv/bin/activate
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
 ### Try it
 ```bash
@@ -162,6 +194,10 @@ From a fresh run in this repo:
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
 - `OLLAMA_MODEL` (default `llava`)
 - `KEY_ID`, `APP_KEY`, `BUCKET_NAME` (Backblaze B2)
+- `TAGLENS_ASYNC_PROCESSING` (`1` to move OCR/AI/faces to background jobs)
+- `TAGLENS_ENABLE_RETENTION` (`1` to periodically delete images older than each user's `retention_days`)
+- `TAGLENS_DIRECT_B2_UPLOAD` (`1` to enable browser-direct B2 uploads from the dashboard; requires B2 CORS rules)
+- `TAGLENS_ENCRYPTION_KEY` or `TAGLENS_ENCRYPTION_KEYS` (comma-separated Fernet keys; enables at-rest encryption for derived metadata fields)
 
 ## Notes
 - `./start_server.sh` supports `DEV_MODE=1` to pass `--dev` to Robyn.
