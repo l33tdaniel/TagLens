@@ -497,7 +497,7 @@ def _ollama_endpoint() -> str:
 
 
 def _ollama_model() -> str:
-    return os.getenv("OLLAMA_MODEL", "llava")
+    return os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
 
 
 def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict:
@@ -847,6 +847,7 @@ def _generate_image_description_with_ollama(
 ) -> str:
     """Generate a short caption using the local Ollama image model."""
     endpoint = f"{_ollama_endpoint()}/api/generate"
+    logger.info("ollama caption request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
     payload = {
         "model": _ollama_model(),
         "prompt": (
@@ -865,12 +866,56 @@ def _generate_image_description_with_ollama(
     try:
         with urllib_request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
+            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
             parsed = json.loads(raw) if raw else {}
-    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("ollama caption failed filename=%s error=%s", filename, exc)
         return ""
     if not isinstance(parsed, dict):
+        logger.warning("ollama unexpected response type filename=%s type=%s", filename, type(parsed))
         return ""
     description = (parsed.get("response") or "").strip()
+    logger.info("ollama caption result filename=%s description=%.100s", filename, description)
+    if not description:
+        return ""
+    return f"{description}"
+
+def _generate_ocr_with_ollama(
+    image_bytes: bytes,
+    *,
+    filename: str,
+) -> str:
+    """Generate a short caption using the local Ollama image model."""
+    endpoint = f"{_ollama_endpoint()}/api/generate"
+    logger.info("ollama ocr request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
+    payload = {
+        "model": _ollama_model(),
+        "prompt": (
+            "Extract all visible text from this image exactly as it appears. "
+            "Return only the raw text, no commentary, no formatting."
+        ),
+        "stream": False,
+        "images": [base64.b64encode(image_bytes).decode("utf-8")],
+    }
+    req = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
+            parsed = json.loads(raw) if raw else {}
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("ollama ocr failed filename=%s error=%s", filename, exc)
+        return ""
+    if not isinstance(parsed, dict):
+        logger.warning("ollama ocr unexpected response type filename=%s type=%s", filename, type(parsed))
+        return ""
+    description = (parsed.get("response") or "").strip()
+    logger.info("ollama ocr result filename=%s description=%.100s", filename, description)
     if not description:
         return ""
     return f"{description}"
@@ -1429,12 +1474,27 @@ async def _handle_photo_upload(
     store_originals = bool(user_settings.store_originals_enabled)
 
     ocr_text = ""
+    make = model = shutter = loc_desc = city = state = country = None
+    iso = None
+    f_stop = focal = lat = lon = None
     if do_ocr and not ASYNC_PROCESSING:
         try:
             extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
             if taken_at is None:
                 taken_at = extracted.taken_at
             ocr_text = extracted.ocr_text
+            make = extracted.make
+            model = extracted.model
+            iso = extracted.iso
+            f_stop = extracted.f_stop
+            shutter = extracted.shutter
+            focal = extracted.focal
+            lat = extracted.lat
+            lon = extracted.lon
+            loc_desc = extracted.loc_desc
+            city = extracted.loc_city
+            state = extracted.loc_state
+            country = extracted.loc_country
         except Exception:
             logger.warning(
                 "upload metadata extraction skipped user_id=%s filename=%s",
@@ -1498,6 +1558,18 @@ async def _handle_photo_upload(
             thumbnail_data=thumbnail_data,
             thumbnail_content_type="image/webp",
             taken_at=taken_at,
+            make=make,
+            model=model,
+            iso=iso,
+            f_stop=f_stop,
+            shutter=shutter,
+            focal=focal,
+            lat=lat,
+            lon=lon,
+            loc_desc=loc_desc,
+            city=city,
+            state=state,
+            country=country,
         )
     except Exception:
         logger.exception(
@@ -1749,38 +1821,6 @@ async def upload_photo_api(request: Request) -> Response:
         taken_at=taken_at,
     )
 
-    faces_json = "[]"
-    try:
-        faces = await detect_and_tag_faces_for_user(auth.user.id, image_bytes, db)
-        faces_json = json.dumps(faces)
-    except Exception:
-        logger.warning(
-            "upload face detection/tagging skipped user_id=%s filename=%s",
-            auth.user.id,
-            filename,
-            exc_info=True,
-        )
-    # Fallback to OpenCV Haar cascade if insightface found nothing
-    if faces_json == "[]":
-        try:
-            import cv2 as _cv2
-            import numpy as _np
-            _pil_img = Image.open(io.BytesIO(image_bytes))
-            _rgb = _np.array(_pil_img.convert("RGB"))
-            _gray = _cv2.cvtColor(_rgb, _cv2.COLOR_RGB2GRAY)
-            _img_h, _img_w = _gray.shape[:2]
-            _min_face = max(30, min(_img_h, _img_w) // 10)
-            for _cname in ("haarcascade_frontalface_alt2.xml", "haarcascade_frontalface_default.xml"):
-                _cascade = _cv2.CascadeClassifier(_cv2.data.haarcascades + _cname)
-                _rects = _cascade.detectMultiScale(_gray, scaleFactor=1.1, minNeighbors=6, minSize=(_min_face, _min_face))
-                if len(_rects) > 0:
-                    faces_json = json.dumps([
-                        {"x": int(x), "y": int(y), "w": int(w), "h": int(h)}
-                        for (x, y, w, h) in _rects
-                    ])
-                    break
-        except Exception:
-            pass
 
 def _sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
