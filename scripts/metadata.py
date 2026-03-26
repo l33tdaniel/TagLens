@@ -24,9 +24,15 @@ from scripts.database_helper import init_db, save_photo_to_db, save_video_to_db
 
 import easyocr
 
-# Setup
+# Setup: register HEIF/HEIC support so Pillow can open iPhone photos.
 pillow_heif.register_heif_opener()
-geolocator = Nominatim(user_agent="TagLens", domain="localhost:8080", scheme="http")
+
+# Reverse-geocoder: converts GPS coordinates to human-readable addresses via
+# OpenStreetMap's Nominatim API. Uses the default public endpoint; a local
+# Nominatim instance can be specified by setting the 'domain' parameter.
+geolocator = Nominatim(user_agent="TagLens")
+
+# Device selection: prefer CUDA (NVIDIA GPU), then MPS (Apple Silicon), then CPU.
 if torch and torch.cuda.is_available():
     device = "cuda"
     reader = easyocr.Reader(["en"], gpu=True)
@@ -56,15 +62,25 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
-    """Detect faces (no identity) and return bounding boxes.
-    Returns a list of dicts with keys: x, y, w, h.
+    """Detect faces using OpenCV's Haar cascade and return bounding boxes.
+
+    This is a lightweight, CPU-only face detector used as a fallback when
+    InsightFace is unavailable. It does NOT identify who the face belongs to —
+    it only locates face regions in the image.
+
+    Returns:
+        A list of dicts with keys: x, y, w, h (pixel coordinates of each face).
     """
-    # Convert PIL image to grayscale numpy array for OpenCV
+    # Convert PIL image to grayscale numpy array for OpenCV's cascade classifier.
     rgb = np.array(img)
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
+    # Load the pre-trained Haar cascade model bundled with OpenCV.
     cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     face_cascade = cv2.CascadeClassifier(cascade_path)
+
+    # Tuned parameters: scaleFactor=1.1 and minNeighbors=5 reduce false positives
+    # while still catching faces at various distances from the camera.
     faces = face_cascade.detectMultiScale(
         gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
     )
@@ -76,16 +92,20 @@ def detect_faces(img: Image.Image) -> List[Dict[str, int]]:
 
 
 def ocr2(img):
+    """Extract visible text from an image using EasyOCR.
+
+    Converts the image to RGB (required by EasyOCR), runs text detection,
+    and returns all recognized text joined into a single string.
+    """
     result = None
 
-    # 3. Strip away any weird transparency layers (forces standard RGB)
+    # EasyOCR requires RGB input — strip alpha/transparency channels.
     if img.mode != "RGB":
         img = img.convert("RGB")
 
     try:
-        # 2. Read the text
         img_array = np.array(img)
-
+        # detail=0 returns plain strings instead of (bbox, text, confidence) tuples.
         text_list = reader.readtext(img_array, detail=0)
         result = " ".join(text_list).strip()
 
@@ -94,42 +114,63 @@ def ocr2(img):
     return result
 
 
-# Helper func
 def to_deci(val):
+    """Convert EXIF GPS coordinates from degrees/minutes/seconds to decimal.
+
+    EXIF stores GPS as a tuple of three rationals: (degrees, minutes, seconds).
+    This converts them to a single decimal-degree float for use with geocoders.
+    """
     return float(val[0]) + (float(val[1]) / 60.0) + (float(val[2]) / 3600.0)
 
 def get_complete_metadata(path, conn, user_id):
-    # Open the image and time how long that takes
+    """Extract all metadata from an image and persist it to the database.
+
+    This is the main pipeline entry-point for photos. It:
+      1. Reads EXIF data (camera info, timestamps, GPS coordinates)
+      2. Reverse-geocodes GPS coordinates to a human-readable location
+      3. Generates an AI caption via the Moondream2 model
+      4. Runs OCR to extract any visible text
+      5. Saves everything to SQLite + uploads the original to B2
+    """
     img = Image.open(path)
 
-    # Get basic metadata like size and whatnot
+    # Basic file and image dimensions.
     file_size_mb = os.path.getsize(path) / (1024 * 1024)
     w, h = img.size
-    exif = img.getexif()
-    exif_ifd = exif.get_ifd(34665)  # Technical
-    gps_info = exif.get_ifd(34853)  # GPS
 
+    # EXIF tag groups: root EXIF, IFD 34665 (camera technical), IFD 34853 (GPS).
+    exif = img.getexif()
+    exif_ifd = exif.get_ifd(34665)  # Camera settings (ISO, aperture, etc.)
+    gps_info = exif.get_ifd(34853)  # GPS coordinates
+
+    # EXIF tag 271 = Make (e.g., "Apple"), tag 272 = Model (e.g., "iPhone 15 Pro").
     phone_make = exif.get(271, "Unknown")
     phone_model = exif.get(272, "Unknown")
+    # Tag 36867 = DateTimeOriginal (when photo was taken), fallback to tag 306 (DateTime).
     date = exif.get(36867) or exif.get(306) or None
 
-    # This is camera info
-    iso = exif_ifd.get(34855, None)
-    f_stop = exif_ifd.get(33437, None)
-    focal = exif_ifd.get(37386, None)
-    exposure = exif_ifd.get(33434, None)
+    # Camera exposure settings from the EXIF IFD sub-directory.
+    iso = exif_ifd.get(34855, None)       # ISO sensitivity (e.g., 100, 800)
+    f_stop = exif_ifd.get(33437, None)    # Aperture f-number (e.g., 1.8)
+    focal = exif_ifd.get(37386, None)     # Focal length in mm
+    exposure = exif_ifd.get(33434, None)  # Exposure time in seconds
+
+    # Convert fractional exposure (e.g., 0.005) to human-readable form (e.g., "1/200").
     shutter = (
         f"1/{int(1/exposure)}"
         if (isinstance(exposure, (int, float)) and exposure > 0 and exposure < 1)
         else f"{exposure}"
     )
 
-    # This is to get location data
+    # --- GPS and reverse geocoding ---
+    # Extract lat/lon from EXIF GPS tags and convert to human-readable location
+    # using the Nominatim geocoder (OpenStreetMap).
     location_data = None
     lat = None
     lon = None
 
     if gps_info and len(gps_info) > 1:
+        # Map numeric EXIF GPS tag IDs to human-readable names (e.g., "GPSLatitude").
         raw_gps = {GPSTAGS.get(k, k): v for k, v in gps_info.items()}
 
         lat = raw_gps.get("GPSLatitude")
@@ -145,7 +186,8 @@ def get_complete_metadata(path, conn, user_id):
                     lon = -lon
 
                 try:
-                    # This reaches out to OpenStreetMap to get the name
+                    # Reverse-geocode via Nominatim (OpenStreetMap) to get a
+                    # human-readable address string from the GPS coordinates.
                     location_data = geolocator.reverse((lat, lon), language="en")
                 except Exception as e:
                     location_data = None
@@ -154,7 +196,8 @@ def get_complete_metadata(path, conn, user_id):
             lat = None
             lon = None
 
-    # Captioning
+    # --- AI captioning ---
+    # Generate a short natural-language description of the image using Moondream2.
     output_caption = None
     if model:
         try:
@@ -166,9 +209,10 @@ def get_complete_metadata(path, conn, user_id):
             print(f"Captioning Error: {e}")
             output_caption = None
 
-    # OCR
+    # --- OCR: extract any visible text from the photo ---
     ocr = ocr2(img)
 
+    # --- Assemble the final metadata dictionary for database insertion ---
     metadata = dict()
     metadata["filename"] = os.path.basename(path)
     metadata["filepath"] = path
@@ -205,13 +249,16 @@ def get_complete_metadata(path, conn, user_id):
 
 
 def handle_video(path, conn, user_id):
-    # 1. Get basic file metadata
+    """Process a video file: extract basic metadata and persist to the database.
+
+    Unlike photos, videos don't undergo EXIF extraction, captioning, or OCR.
+    Only the file path, size, and user association are stored. The original
+    video file is uploaded to B2 cloud storage via save_video_to_db().
+    """
     file_size_mb = os.path.getsize(path) / (1024 * 1024)
     filename = os.path.basename(path)
 
-    # 2. Package the metadata dictionary
-    # Keeping this strictly to the basics per your DB requirements:
-    # user_id, filepath, size, and filename (for B2 upload extension).
+    # Minimal metadata dict — videos only need path, size, and user info.
     metadata = {
         "filename": filename,
         "filepath": path,

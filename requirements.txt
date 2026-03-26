@@ -1,16 +1,29 @@
 # Purpose: runtime dependencies for TagLens.
 # Authorship (git history, mapped to real names): Daniel (l33tdaniel), Srihari (dimes130)
-robyn>=0.9
-uvicorn[standard]>=0.23
-passlib[bcrypt]>=1.7
-bcrypt<4.0
-argon2-cffi>=23.1
-aiosqlite>=0.20
-markupsafe>=2.1
-Jinja2>=3.1
-cryptography>=42.0
-Pillow>=10.0
-insightface>=0.7.3
-onnxruntime>=1.17
-easyocr>=1.7.2
-pillow-heif>=0.18
+
+# --- Web framework and server ---
+robyn>=0.9                  # Async Python web framework (Rust-backed)
+uvicorn[standard]>=0.23     # ASGI server for running the app
+
+# --- Authentication and security ---
+passlib[bcrypt]>=1.7        # Password hashing library (supports multiple algorithms)
+bcrypt<4.0                  # Bcrypt backend for passlib (pinned below 4.0 for API compat)
+argon2-cffi>=23.1           # Argon2 password hashing (preferred over bcrypt for new users)
+cryptography>=42.0          # Encryption primitives for at-rest data encryption
+
+# --- Database ---
+aiosqlite>=0.20             # Async SQLite driver for the main application database
+
+# --- Templating ---
+markupsafe>=2.1             # HTML escaping (Jinja2 dependency)
+Jinja2>=3.1                 # Template engine for server-rendered HTML pages
+
+# --- Image processing and ML ---
+Pillow>=10.0                # Core image library (JPEG, PNG, WebP, EXIF reading)
+insightface>=0.7.3          # Deep-learning face detection and recognition
+onnxruntime>=1.17           # ONNX model runtime (backend for insightface)
+easyocr>=1.7.2              # Optical character recognition for text-in-image extraction
+pillow-heif>=0.18           # HEIF/HEIC image support (iPhone photo format)
+
+# --- Cloud storage ---
+b2sdk>=2.0                  # Backblaze B2 cloud storage SDK for photo uploads/downloads

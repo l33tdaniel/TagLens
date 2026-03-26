@@ -18,7 +18,7 @@ from scripts.upload import upload_to_b2
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
-def init_db(db_path="data\\photos.db"):
+def init_db(db_path="data/photos.db"):
     """Create the sqlite schema and return a connected handle."""
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
