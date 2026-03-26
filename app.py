@@ -1353,6 +1353,33 @@ async def profile_api(request: Request) -> Response:
         }
     )
 
+@app.get("/search")
+async def search_page(request: Request) -> Response:
+    """AI search page for photos."""
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return auth
+
+    context = auth
+    user = context.user
+    csrf_token, set_csrf = _get_or_create_csrf_token(request)
+
+    response = jinja_template.render_template(
+        "search/Search.html",  # 👈 make sure this file exists
+        request=request,
+        title="Search",
+        user=user,
+    )
+
+    _apply_common_cookies(
+        response,
+        clear_session=context.clear_cookie,
+        csrf_token=csrf_token,
+        set_csrf=set_csrf,
+    )
+
+    return response
+
 
 def _payload_optional_bool(payload: dict, key: str) -> Optional[bool]:
     if key not in payload:
@@ -2204,6 +2231,41 @@ async def photo_status_api(request: Request) -> Response:
             "error": job.error,
         }
     )
+
+
+@app.get("/api/photos/search")
+async def search_photos_api(request: Request) -> Response:
+    auth = await _ensure_authenticated(request)
+    if isinstance(auth, Response):
+        return _json_response({"error": "authentication required"}, status=401)
+
+    query = str(request.query_params.get("q", "")).strip().lower()
+
+    if not query:
+        return _json_response({"photos": []})
+
+    images = await db.list_images_for_user(auth.user.id)
+
+    results = []
+    for record in images:
+        searchable_text = " ".join([
+            record.filename or "",
+            record.ai_description or "",
+            record.ocr_text or ""
+        ]).lower()
+
+        if query in searchable_text:
+            results.append({
+                "id": record.id,
+                "filename": record.filename,
+                "description": record.ai_description,
+                "ocr_text": record.ocr_text,
+                "faces": public_faces_payload(record.faces_json),
+                "created_at": record.created_at,
+                "taken_at": record.taken_at,
+            })
+
+    return _json_response({"photos": results})
 
 
 @app.get("/api/photos/download")
