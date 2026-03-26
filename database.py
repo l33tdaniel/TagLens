@@ -69,6 +69,19 @@ class ImageRecord:
     taken_at: Optional[str]
     created_at: str
 
+    make: Optional[str] = None
+    model: Optional[str] = None
+    iso: Optional[int] = None
+    f_stop: Optional[float] = None
+    shutter: Optional[str] = None
+    focal: Optional[float] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    loc_desc: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+
 
 @dataclass
 class FaceEmbeddingRecord:
@@ -136,6 +149,18 @@ class Database:
                     thumbnail_content_type TEXT NOT NULL DEFAULT 'image/webp',
                     taken_at TEXT,
                     created_at TEXT NOT NULL,
+                    make TEXT,
+                    model TEXT,
+                    iso INTEGER,
+                    f_stop REAL,
+                    shutter TEXT,
+                    focal REAL,
+                    lat REAL,
+                    lon REAL,
+                    loc_desc TEXT,
+                    city TEXT,
+                    state TEXT,
+                    country TEXT,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
                 )
                 """)
@@ -311,6 +336,18 @@ class Database:
         thumbnail_data: Optional[bytes] = None,
         thumbnail_content_type: str = "image/webp",
         taken_at: Optional[str] = None,
+        make: Optional[str] = None,
+        model: Optional[str] = None,
+        iso: Optional[int] = None,
+        f_stop: Optional[float] = None,
+        shutter: Optional[str] = None,
+        focal: Optional[float] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        loc_desc: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        country: Optional[str] = None,
     ) -> ImageRecord:
         """Insert processed image metadata and return the constructed dataclass."""
         created_at = datetime.utcnow().isoformat()
@@ -328,9 +365,22 @@ class Database:
                     thumbnail_data,
                     thumbnail_content_type,
                     taken_at,
-                    created_at
+                    created_at,
+                    make,
+                    model,
+                    iso,
+                    f_stop,
+                    shutter,
+                    focal,
+                    lat,
+                    lon,
+                    loc_desc,
+                    city,
+                    state,
+                    country
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -344,6 +394,18 @@ class Database:
                     thumbnail_content_type,
                     taken_at,
                     created_at,
+                    make,
+                    model,
+                    iso,
+                    f_stop,
+                    shutter,
+                    focal,
+                    lat,
+                    lon,
+                    loc_desc,
+                    city,
+                    state,
+                    country,
                 ),
             )
             await conn.commit()
@@ -393,7 +455,19 @@ class Database:
                     thumbnail_data,
                     thumbnail_content_type,
                     taken_at,
-                    created_at
+                    created_at,
+                    make,
+                    model,
+                    iso,
+                    f_stop,
+                    shutter,
+                    focal,
+                    lat,
+                    lon,
+                    loc_desc,
+                    city,
+                    state,
+                    country
                 FROM images
                 WHERE user_id = ?
                 ORDER BY {sort_clause} {order_clause}, id DESC
@@ -421,7 +495,19 @@ class Database:
                 thumbnail_data,
                 thumbnail_content_type,
                 taken_at,
-                created_at
+                created_at,
+                make,
+                model,
+                iso,
+                f_stop,
+                shutter,
+                focal,
+                lat,
+                lon,
+                loc_desc,
+                city,
+                state,
+                country
             FROM images
             WHERE id = ? AND user_id = ?
             """,

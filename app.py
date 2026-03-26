@@ -477,7 +477,7 @@ def _ollama_endpoint() -> str:
 
 
 def _ollama_model() -> str:
-    return os.getenv("OLLAMA_MODEL", "llava")
+    return os.getenv("OLLAMA_MODEL", "qwen3.5:2b")
 
 
 def _normalize_content_type(content_type: str, filename: str) -> str:
@@ -580,6 +580,7 @@ def _generate_image_description_with_ollama(
 ) -> str:
     """Generate a short caption using the local Ollama image model."""
     endpoint = f"{_ollama_endpoint()}/api/generate"
+    logger.info("ollama caption request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
     payload = {
         "model": _ollama_model(),
         "prompt": (
@@ -598,12 +599,56 @@ def _generate_image_description_with_ollama(
     try:
         with urllib_request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
+            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
             parsed = json.loads(raw) if raw else {}
-    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError):
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("ollama caption failed filename=%s error=%s", filename, exc)
         return ""
     if not isinstance(parsed, dict):
+        logger.warning("ollama unexpected response type filename=%s type=%s", filename, type(parsed))
         return ""
     description = (parsed.get("response") or "").strip()
+    logger.info("ollama caption result filename=%s description=%.100s", filename, description)
+    if not description:
+        return ""
+    return f"{description}"
+
+def _generate_ocr_with_ollama(
+    image_bytes: bytes,
+    *,
+    filename: str,
+) -> str:
+    """Generate a short caption using the local Ollama image model."""
+    endpoint = f"{_ollama_endpoint()}/api/generate"
+    logger.info("ollama ocr request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
+    payload = {
+        "model": _ollama_model(),
+        "prompt": (
+            "Extract all visible text from this image exactly as it appears. "
+            "Return only the raw text, no commentary, no formatting."
+        ),
+        "stream": False,
+        "images": [base64.b64encode(image_bytes).decode("utf-8")],
+    }
+    req = urllib_request.Request(
+        endpoint,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(req, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
+            parsed = json.loads(raw) if raw else {}
+    except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("ollama ocr failed filename=%s error=%s", filename, exc)
+        return ""
+    if not isinstance(parsed, dict):
+        logger.warning("ollama ocr unexpected response type filename=%s type=%s", filename, type(parsed))
+        return ""
+    description = (parsed.get("response") or "").strip()
+    logger.info("ollama ocr result filename=%s description=%.100s", filename, description)
     if not description:
         return ""
     return f"{description}"
@@ -900,15 +945,15 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
         )
         return _json_response({"error": "empty image payload"}, status=400)
-    MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-    if len(image_bytes) > MAX_UPLOAD_BYTES:
-        logger.warning(
-            "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
-            auth.user.id,
-            filename,
-            len(image_bytes),
-        )
-        return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
+    # MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+    # if len(image_bytes) > MAX_UPLOAD_BYTES:
+    #     logger.warning(
+    #         "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
+    #         auth.user.id,
+    #         filename,
+    #         len(image_bytes),
+    #     )
+    #     return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
     logger.info(
         "upload started user_id=%s filename=%s bytes=%s content_type=%s",
         auth.user.id,
@@ -916,12 +961,22 @@ async def upload_photo_api(request: Request) -> Response:
         len(image_bytes),
         content_type,
     )
-    ocr_text = ""
     try:
         extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
         if taken_at is None:
             taken_at = extracted.taken_at
-        ocr_text = extracted.ocr_text
+        make = extracted.make
+        model = extracted.model
+        iso = extracted.iso
+        f_stop = extracted.f_stop
+        shutter = extracted.shutter
+        focal = extracted.focal
+        lat = extracted.lat
+        lon = extracted.lon
+        desc = extracted.loc_desc
+        city = extracted.loc_city
+        state = extracted.loc_state
+        country = extracted.loc_country
     except Exception:
         logger.warning(
             "upload metadata extraction skipped user_id=%s filename=%s",
@@ -939,6 +994,7 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
             exc_info=True,
         )
+    description = ""
     try:
         # 1. Generate caption
         description = await asyncio.to_thread(
@@ -953,6 +1009,23 @@ async def upload_photo_api(request: Request) -> Response:
             filename,
         )
         return _json_response({"error": "upload failed unexpectedly"}, status=500)
+
+    ocr_text = ""
+    try:
+        # 2. Extract Text (Runs strictly AFTER caption block resolves)
+        ocr_text = await asyncio.to_thread(
+            _generate_ocr_with_ollama,
+            image_bytes,
+            filename=filename,
+        )
+    except Exception as exc:
+        # Log specifically that the OCR failed
+        logger.exception(
+            "upload OCR extraction failed user_id=%s filename=%s error=%s",
+            auth.user.id,
+            filename,
+            exc,
+        )
 
     faces_json = "[]"
     try:
@@ -981,6 +1054,18 @@ async def upload_photo_api(request: Request) -> Response:
             thumbnail_data=thumbnail_data,
             thumbnail_content_type="image/webp",
             taken_at=taken_at,
+            make=make,
+            model=model,
+            iso=iso,
+            f_stop=f_stop,
+            shutter=shutter,
+            focal=focal,
+            lat=lat,
+            lon=lon,
+            loc_desc=desc,
+            city=city,
+            state=state,
+            country=country,
         )
     except Exception:
         logger.exception(
