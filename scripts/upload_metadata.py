@@ -47,7 +47,7 @@ try:
     from geopy.geocoders import Nominatim
     # Reverse-geocoder: converts GPS coordinates to human-readable addresses
     # via OpenStreetMap's Nominatim API (public endpoint, no API key needed).
-    geolocator = Nominatim(user_agent="TagLens")
+    geolocator = Nominatim(user_agent="TagLens", domain='localhost:8080', scheme="http")
 except ImportError:
     geolocator=None
 
@@ -249,7 +249,8 @@ def _location_data(image):
                 # Reverse-geocode coordinates to get an address string.
                 try:
                     location_data = geolocator.reverse((lat, lon), language="en")
-                except:
+                except Exception as e:
+                    print(f"NOMANATIM ERROR: {e}" )
                     location_data = None
 
         # Parse the Nominatim response string into structured location fields.
