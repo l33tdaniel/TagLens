@@ -82,10 +82,10 @@
       <div class="w-full max-w-2xl">
 
         <h2 class="text-3xl font-semibold mb-2">
-          Upload Photos
+          Upload Media
         </h2>
         <p class="text-gray-500 mb-8">
-          JPEG, PNG, HEIC, and other image formats
+          JPEG, PNG, HEIC, MP4, and other image formats
         </p>
 
         <form
@@ -163,8 +163,8 @@ const myDropzone = new Dropzone("#photoDropzone", {
   autoProcessQueue: false,   // 🚨 important
   uploadMultiple: false,     // keep false since backend expects 1 JSON per request
   parallelUploads: 5,
-  maxFilesize: 20,
-  acceptedFiles: "image/*",
+  maxFilesize: 2000,
+  acceptedFiles: "image/*, video/*",
 });
 
 let isUploading = false;
@@ -235,6 +235,8 @@ async function uploadSingleFile(file) {
   const bytes = await file.arrayBuffer();
   const csrf = getCsrfToken();
 
+  const dateIso = new Date(file.lastModified).toISOString();
+
   // Prefer browser-direct B2 uploads when enabled on the server.
   try {
     const initRes = await fetch("/api/uploads/b2/init", {
@@ -243,6 +245,7 @@ async function uploadSingleFile(file) {
       body: JSON.stringify({
         filename: file.name,
         content_type: file.type || "application/octet-stream",
+        taken_at: dateIso, 
       }),
     });
     const initBody = await initRes.json().catch(() => ({}));
@@ -278,7 +281,7 @@ async function uploadSingleFile(file) {
   }
 
   // Fallback: upload raw bytes to the server (server writes to B2/SQLite).
-  const url = `/api/photos/raw?filename=${encodeURIComponent(file.name)}`;
+  const url = `/api/photos/raw?filename=${encodeURIComponent(file.name)}&taken_at=${encodeURIComponent(dateIso)}`;
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": file.type || "application/octet-stream", "X-CSRF-Token": csrf },

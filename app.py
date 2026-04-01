@@ -34,6 +34,11 @@ from robyn.templating import JinjaTemplate
 import mimetypes
 import logging
 import asyncio
+
+import tempfile
+import cv2
+import numpy as np
+
 try:
     from PIL import Image, UnidentifiedImageError
 except ImportError:  # pragma: no cover - optional dependency in some environments
@@ -723,10 +728,10 @@ def _metadata_response_dict(record) -> dict:
 def _normalize_content_type(content_type: str, filename: str) -> str:
     """Normalize content type; fall back to filename inference."""
     candidate = (content_type or "").strip().lower()
-    if candidate.startswith("image/"):
+    if candidate.startswith("image/") or or candidate.startswith("video/"):
         return candidate
     guessed, _ = mimetypes.guess_type(filename)
-    if guessed and guessed.startswith("image/"):
+    if guessed and (guessed.startswith("image/") or guessed.startswith("video/")):
         return guessed
     return "application/octet-stream"
 
@@ -766,6 +771,47 @@ def _generate_thumbnail_webp(
     if not thumbnail:
         raise ValueError("empty thumbnail generated")
     return thumbnail
+
+def _process_video_bytes(
+    video_bytes: bytes, 
+    *, 
+    max_size: tuple[int, int] = (480, 480), 
+    quality: int = 70
+) -> bytes:
+    """
+    Extracts a thumbnail frame and dimensions from video bytes using OpenCV.
+    Returns: (thumbnail_webp_bytes, width, height)
+    """
+    if Image is None:
+        raise RuntimeError("Pillow is required for thumbnail generation")
+
+    # OpenCV VideoCapture requires a file path, so we use a temporary file
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp4") as tmp:
+        tmp.write(video_bytes)
+        tmp.flush()
+
+        cap = cv2.VideoCapture(tmp.name)
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream for thumbnail")
+
+        # Read the first frame
+        success, frame = cap.read()
+        cap.release()
+
+        if not success:
+            raise ValueError("Could not read a frame from the video")
+
+        # OpenCV reads in BGR format; convert to RGB for Pillow
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Convert to Pillow Image and generate standard TagLens WEBP thumbnail
+        img = Image.fromarray(frame_rgb)
+        img.thumbnail(max_size)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="WEBP", quality=quality, optimize=True)
+        
+        return buffer.getvalue()
 
 
 def _photo_file_key(user_id: int, photo_id: int, filename: str) -> str:
@@ -1513,10 +1559,14 @@ async def _handle_photo_upload(
     )
 
     user_settings = await db.ensure_user_settings(auth.user.id)
-    do_ocr = bool(user_settings.ocr_enabled)
-    do_ai = bool(user_settings.ai_descriptions_enabled)
-    do_faces = bool(user_settings.face_recognition_enabled)
-    store_originals = bool(user_settings.store_originals_enabled)
+    is_video = content_type.startswith("video/")
+
+    do_ocr = bool(user_settings.ocr_enabled) and not is_video
+    do_ai = bool(user_settings.ai_descriptions_enabled) and not is_video
+    do_faces = bool(user_settings.face_recognition_enabled) and not is_video
+
+    # Will need to make thumbnails for videos always
+    store_originals = True if is_video else bool(user_settings.store_originals_enabled)
 
     ocr_text = ""
     make = model = shutter = loc_desc = city = state = country = None
@@ -1550,7 +1600,10 @@ async def _handle_photo_upload(
 
     thumbnail_data: Optional[bytes] = None
     try:
-        thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
+        if is_video:
+            thumbnail_data = await asyncio.to_thread(_process_video_bytes, image_bytes)
+        else:
+            thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
     except Exception:
         logger.warning(
             "upload thumbnail generation skipped user_id=%s filename=%s",
