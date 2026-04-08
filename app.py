@@ -34,6 +34,11 @@ from robyn.templating import JinjaTemplate
 import mimetypes
 import logging
 import asyncio
+
+import tempfile
+import cv2
+import numpy as np
+
 try:
     from PIL import Image, UnidentifiedImageError
 except ImportError:  # pragma: no cover - optional dependency in some environments
@@ -493,7 +498,7 @@ def _json_response(payload: dict, *, status: int = 200) -> Response:
 
 
 def _ollama_endpoint() -> str:
-    return os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+    return os.getenv("OLLAMA_BASE_URL", "http://172.30.112.1:11434").rstrip("/")
 
 
 def _ollama_model() -> str:
@@ -577,8 +582,8 @@ def _extract_metadata_from_bytes(image_bytes: bytes, filename: str = "") -> dict
 
     # OCR
     try:
-        extracted = extract_upload_metadata(image_bytes)
-        data["ocr_text"] = extracted.ocr_text or ""
+        extracted = _generate_ocr_with_ollama(image_bytes, filename=filename)
+        data["ocr_text"] = extracted or ""
     except Exception:
         pass
 
@@ -723,10 +728,10 @@ def _metadata_response_dict(record) -> dict:
 def _normalize_content_type(content_type: str, filename: str) -> str:
     """Normalize content type; fall back to filename inference."""
     candidate = (content_type or "").strip().lower()
-    if candidate.startswith("image/"):
+    if candidate.startswith("image/") or or candidate.startswith("video/"):
         return candidate
     guessed, _ = mimetypes.guess_type(filename)
-    if guessed and guessed.startswith("image/"):
+    if guessed and (guessed.startswith("image/") or guessed.startswith("video/")):
         return guessed
     return "application/octet-stream"
 
@@ -766,6 +771,47 @@ def _generate_thumbnail_webp(
     if not thumbnail:
         raise ValueError("empty thumbnail generated")
     return thumbnail
+
+def _process_video_bytes(
+    video_bytes: bytes, 
+    *, 
+    max_size: tuple[int, int] = (480, 480), 
+    quality: int = 70
+) -> bytes:
+    """
+    Extracts a thumbnail frame and dimensions from video bytes using OpenCV.
+    Returns: (thumbnail_webp_bytes, width, height)
+    """
+    if Image is None:
+        raise RuntimeError("Pillow is required for thumbnail generation")
+
+    # OpenCV VideoCapture requires a file path, so we use a temporary file
+    with tempfile.NamedTemporaryFile(delete=True, suffix=".mp4") as tmp:
+        tmp.write(video_bytes)
+        tmp.flush()
+
+        cap = cv2.VideoCapture(tmp.name)
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream for thumbnail")
+
+        # Read the first frame
+        success, frame = cap.read()
+        cap.release()
+
+        if not success:
+            raise ValueError("Could not read a frame from the video")
+
+        # OpenCV reads in BGR format; convert to RGB for Pillow
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Convert to Pillow Image and generate standard TagLens WEBP thumbnail
+        img = Image.fromarray(frame_rgb)
+        img.thumbnail(max_size)
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="WEBP", quality=quality, optimize=True)
+        
+        return buffer.getvalue()
 
 
 def _photo_file_key(user_id: int, photo_id: int, filename: str) -> str:
@@ -839,15 +885,31 @@ def _photo_view_response(
         description="",
     )
 
+def _normalize_image_for_ollama(image_bytes: bytes) -> str:
+    """
+    Decode many input formats (including HEIC if pillow-heif is registered),
+    convert to JPEG, and return base64-encoded JPEG bytes for Ollama.
+    """
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=92)
+        return base64.b64encode(out.getvalue()).decode("utf-8")
 
 def _generate_image_description_with_ollama(
     image_bytes: bytes,
     *,
     filename: str,
 ) -> str:
-    """Generate a short caption using the local Ollama image model."""
+    try:
+        image_b64 = _normalize_image_for_ollama(image_bytes)
+    except Exception as exc:
+        logger.warning("image normalization failed when captioning filename=%s error=%s", filename, exc)
+        return ""
+
     endpoint = f"{_ollama_endpoint()}/api/generate"
-    logger.info("ollama caption request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
     payload = {
         "model": _ollama_model(),
         "prompt": (
@@ -855,7 +917,8 @@ def _generate_image_description_with_ollama(
             "Write 1-2 concise sentences with the key visible subjects, setting, and notable details."
         ),
         "stream": False,
-        "images": [base64.b64encode(image_bytes).decode("utf-8")],
+        "images": [image_b64],
+        "keep_alive": -1
     }
     req = urllib_request.Request(
         endpoint,
@@ -866,7 +929,7 @@ def _generate_image_description_with_ollama(
     try:
         with urllib_request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
+            # logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
             parsed = json.loads(raw) if raw else {}
     except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         logger.warning("ollama caption failed filename=%s error=%s", filename, exc)
@@ -874,20 +937,22 @@ def _generate_image_description_with_ollama(
     if not isinstance(parsed, dict):
         logger.warning("ollama unexpected response type filename=%s type=%s", filename, type(parsed))
         return ""
-    description = (parsed.get("response") or "").strip()
-    logger.info("ollama caption result filename=%s description=%.100s", filename, description)
-    if not description:
-        return ""
-    return f"{description}"
+    text = (parsed.get("response") or "").strip()
+    # logger.info("ollama caption result filename=%s text=%.100s", filename, text)
+    return text
 
 def _generate_ocr_with_ollama(
     image_bytes: bytes,
     *,
     filename: str,
 ) -> str:
-    """Generate a short caption using the local Ollama image model."""
+    try:
+        image_b64 = _normalize_image_for_ollama(image_bytes)
+    except Exception as exc:
+        logger.warning("image normalization failed when OCRing filename=%s error=%s", filename, exc)
+        return ""
+
     endpoint = f"{_ollama_endpoint()}/api/generate"
-    logger.info("ollama ocr request endpoint=%s model=%s filename=%s", endpoint, _ollama_model(), filename)
     payload = {
         "model": _ollama_model(),
         "prompt": (
@@ -895,7 +960,8 @@ def _generate_ocr_with_ollama(
             "Return only the raw text, no commentary, no formatting."
         ),
         "stream": False,
-        "images": [base64.b64encode(image_bytes).decode("utf-8")],
+        "images": [image_b64],
+        "keep_alive": -1
     }
     req = urllib_request.Request(
         endpoint,
@@ -906,7 +972,7 @@ def _generate_ocr_with_ollama(
     try:
         with urllib_request.urlopen(req, timeout=60) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-            logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
+            # logger.info("ollama raw response filename=%s body=%.200s", filename, raw)
             parsed = json.loads(raw) if raw else {}
     except (urllib_error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         logger.warning("ollama ocr failed filename=%s error=%s", filename, exc)
@@ -914,11 +980,9 @@ def _generate_ocr_with_ollama(
     if not isinstance(parsed, dict):
         logger.warning("ollama ocr unexpected response type filename=%s type=%s", filename, type(parsed))
         return ""
-    description = (parsed.get("response") or "").strip()
-    logger.info("ollama ocr result filename=%s description=%.100s", filename, description)
-    if not description:
-        return ""
-    return f"{description}"
+    text = (parsed.get("response") or "").strip()
+    # logger.info("ollama ocr result filename=%s text=%.100s", filename, text)
+    return text
 
 
 async def _process_image_job(job: JobRecord) -> None:
@@ -951,8 +1015,8 @@ async def _process_image_job(job: JobRecord) -> None:
 
     if payload.get("do_ocr") is True:
         try:
+            ocr_text = await asyncio.to_thread(_generate_ocr_with_ollama, image_bytes, filename=record.filename)
             extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
-            ocr_text = extracted.ocr_text
             if record.taken_at is None and extracted.taken_at is not None:
                 taken_at = extracted.taken_at
         except Exception:
@@ -1477,15 +1541,15 @@ async def _handle_photo_upload(
             filename,
         )
         return _json_response({"error": "empty image payload"}, status=400)
-    MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-    if len(image_bytes) > MAX_UPLOAD_BYTES:
-        logger.warning(
-            "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
-            auth.user.id,
-            filename,
-            len(image_bytes),
-        )
-        return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
+    # MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+    # if len(image_bytes) > MAX_UPLOAD_BYTES:
+    #     logger.warning(
+    #         "upload rejected user_id=%s filename=%s reason=too_large bytes=%s",
+    #         auth.user.id,
+    #         filename,
+    #         len(image_bytes),
+    #     )
+    #     return _json_response({"error": "file exceeds 20 MB limit"}, status=413)
     logger.info(
         "upload started user_id=%s filename=%s bytes=%s content_type=%s",
         auth.user.id,
@@ -1495,10 +1559,14 @@ async def _handle_photo_upload(
     )
 
     user_settings = await db.ensure_user_settings(auth.user.id)
-    do_ocr = bool(user_settings.ocr_enabled)
-    do_ai = bool(user_settings.ai_descriptions_enabled)
-    do_faces = bool(user_settings.face_recognition_enabled)
-    store_originals = bool(user_settings.store_originals_enabled)
+    is_video = content_type.startswith("video/")
+
+    do_ocr = bool(user_settings.ocr_enabled) and not is_video
+    do_ai = bool(user_settings.ai_descriptions_enabled) and not is_video
+    do_faces = bool(user_settings.face_recognition_enabled) and not is_video
+
+    # Will need to make thumbnails for videos always
+    store_originals = True if is_video else bool(user_settings.store_originals_enabled)
 
     ocr_text = ""
     make = model = shutter = loc_desc = city = state = country = None
@@ -1506,10 +1574,10 @@ async def _handle_photo_upload(
     f_stop = focal = lat = lon = None
     if do_ocr and not ASYNC_PROCESSING:
         try:
+            ocr_text = await asyncio.to_thread(_generate_ocr_with_ollama, image_bytes, filename=filename)
             extracted = await asyncio.to_thread(extract_upload_metadata, image_bytes)
             if taken_at is None:
                 taken_at = extracted.taken_at
-            ocr_text = extracted.ocr_text
             make = extracted.make
             model = extracted.model
             iso = extracted.iso
@@ -1532,7 +1600,10 @@ async def _handle_photo_upload(
 
     thumbnail_data: Optional[bytes] = None
     try:
-        thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
+        if is_video:
+            thumbnail_data = await asyncio.to_thread(_process_video_bytes, image_bytes)
+        else:
+            thumbnail_data = await asyncio.to_thread(_generate_thumbnail_webp, image_bytes)
     except Exception:
         logger.warning(
             "upload thumbnail generation skipped user_id=%s filename=%s",
@@ -1678,9 +1749,9 @@ async def upload_photo_raw_api(request: Request) -> Response:
     filename = re.sub(r"[^\w.\-() ]", "_", filename).strip()
     if not filename:
         filename = "upload"
-    taken_at = _parse_taken_at(request.query_params.get("taken_at"))
+    taken_at = _parse_taken_at(request.query_params.get("taken_at", ""))
     content_type = _normalize_content_type(
-        str(request.headers.get("content-type", "")),
+        str(request.headers.get("content-type")),
         filename,
     )
     image_bytes = _raw_body_bytes(request)
