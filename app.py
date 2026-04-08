@@ -77,6 +77,18 @@ static_dir = current_file_path / "frontend" / "static"
 
 jinja_template = JinjaTemplate(os.path.join(current_file_path, "frontend/pages"))
 
+# ---------------------------------------------------------------------------
+# API documentation settings (Swagger/OpenAPI).
+# These are intentionally defined near the top so they are easy to find and
+# adjust without scanning for the `/openapi.json` route later on.
+# ---------------------------------------------------------------------------
+OPENAPI_TITLE = "TagLens API"
+OPENAPI_VERSION = "0.1.0"
+OPENAPI_DESCRIPTION = (
+    "API documentation for TagLens. This spec is intentionally lightweight and "
+    "hand-maintained to keep runtime dependencies minimal."
+)
+
 class RateLimiter:
     """Simple in-memory sliding-window rate limiter keyed by IP."""
 
@@ -495,6 +507,448 @@ def _json_response(payload: dict, *, status: int = 200) -> Response:
         headers={"content-type": "application/json; charset=utf-8"},
         description=json.dumps(payload),
     )
+
+
+# ---------------------------------------------------------------------------
+# Health/readiness helpers.
+# These endpoints are used by load balancers and orchestration systems.
+# ---------------------------------------------------------------------------
+
+def _request_base_url(request: Request) -> str:
+    """
+    Infer a base URL from headers.
+
+    We intentionally avoid request.url here because proxies often rewrite the
+    incoming scheme/host and surface the correct values via X-Forwarded-*.
+    """
+    scheme = (
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        or "http"
+    )
+    host = (
+        (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+        or request.headers.get("host")
+        or "127.0.0.1"
+    )
+    return f"{scheme}://{host}"
+
+
+async def _readiness_payload() -> Tuple[dict, int]:
+    """
+    Compute readiness details and return (payload, status).
+
+    Ready means the database is reachable. B2 is optional, so its status is
+    reported but does not gate readiness.
+    """
+    db_ready = await db.healthcheck()
+    b2_configured = bool(KEY_ID and APP_KEY and BUCKET_NAME)
+    b2_ready = bucket is not None if b2_configured else None
+    status = 200 if db_ready else 503
+    return (
+        {
+            "ok": db_ready,
+            "db_ready": db_ready,
+            "b2_configured": b2_configured,
+            "b2_ready": b2_ready,
+            "time": _now_iso(),
+        },
+        status,
+    )
+
+
+def _swagger_ui_html(openapi_url: str) -> str:
+    """
+    Return a minimal Swagger UI page that points at the OpenAPI JSON.
+
+    We use a CDN-hosted Swagger UI bundle so the app stays dependency-light.
+    """
+    return f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{escape(OPENAPI_TITLE)} Docs</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    body {{
+      margin: 0;
+      background: #f6f7fb;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }}
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = function () {{
+      SwaggerUIBundle({{
+        url: "{openapi_url}",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        displayRequestDuration: true,
+        tryItOutEnabled: true
+      }});
+    }};
+  </script>
+</body>
+</html>
+"""
+
+
+def _openapi_spec(base_url: str) -> dict:
+    """
+    Build a minimal OpenAPI 3.0 spec.
+
+    This intentionally stays shallow (schemas are lightweight) so we don't
+    have to mirror every field of every response.
+    """
+    # Common, re-used schemas. These help Swagger UI render something useful
+    # without forcing us to fully model every object.
+    schemas = {
+        "ErrorResponse": {
+            "type": "object",
+            "properties": {"error": {"type": "string"}},
+        },
+        "OkResponse": {
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+        },
+        "PhotoUploadRequest": {
+            "type": "object",
+            "required": ["filename", "image_base64", "content_type"],
+            "properties": {
+                "filename": {"type": "string"},
+                "image_base64": {"type": "string"},
+                "content_type": {"type": "string"},
+                "taken_at": {"type": "string", "format": "date-time"},
+            },
+        },
+        "PhotoShareRequest": {
+            "type": "object",
+            "required": ["photo_id"],
+            "properties": {"photo_id": {"type": "integer"}},
+        },
+        "PhotoShareRevokeRequest": {
+            "type": "object",
+            "required": ["photo_id"],
+            "properties": {
+                "photo_id": {"type": "integer"},
+                "token_prefix": {"type": "string"},
+            },
+        },
+        "PhotoRecaptionRequest": {
+            "type": "object",
+            "required": ["photo_id"],
+            "properties": {"photo_id": {"type": "integer"}},
+        },
+        "PhotoDeleteRequest": {
+            "type": "object",
+            "required": ["photo_id", "confirm_delete"],
+            "properties": {
+                "photo_id": {"type": "integer"},
+                "confirm_delete": {"type": "boolean"},
+            },
+        },
+        "AclGrantRequest": {
+            "type": "object",
+            "required": ["photo_id", "email"],
+            "properties": {
+                "photo_id": {"type": "integer"},
+                "email": {"type": "string"},
+                "permission": {"type": "string"},
+            },
+        },
+        "AclRevokeRequest": {
+            "type": "object",
+            "required": ["photo_id", "grantee_user_id"],
+            "properties": {
+                "photo_id": {"type": "integer"},
+                "grantee_user_id": {"type": "integer"},
+            },
+        },
+        "PrivacySettingsRequest": {
+            "type": "object",
+            "properties": {
+                "ai_descriptions_enabled": {"type": "boolean"},
+                "ocr_enabled": {"type": "boolean"},
+                "face_recognition_enabled": {"type": "boolean"},
+                "store_originals_enabled": {"type": "boolean"},
+                "retention_days": {"type": "integer", "nullable": True},
+            },
+        },
+    }
+
+    # Security definition: session cookie auth.
+    security_schemes = {
+        "cookieAuth": {
+            "type": "apiKey",
+            "in": "cookie",
+            "name": SESSION_COOKIE_NAME,
+        }
+    }
+
+    # Paths are grouped by their feature area for readability in the UI.
+    paths: dict = {
+        "/healthz": {
+            "get": {
+                "summary": "Liveness probe",
+                "responses": {
+                    "200": {"description": "Service is up", "content": {"application/json": {"schema": schemas["OkResponse"]}}},
+                },
+            }
+        },
+        "/readyz": {
+            "get": {
+                "summary": "Readiness probe",
+                "responses": {
+                    "200": {"description": "Service ready"},
+                    "503": {"description": "Service not ready"},
+                },
+            }
+        },
+        "/api/profile": {
+            "get": {
+                "summary": "Current user profile and photos",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "sort_by", "in": "query", "schema": {"type": "string"}},
+                    {"name": "order", "in": "query", "schema": {"type": "string"}},
+                    {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+                    {"name": "offset", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {
+                    "200": {"description": "Profile payload"},
+                    "401": {"description": "Not authenticated", "content": {"application/json": {"schema": schemas["ErrorResponse"]}}},
+                },
+            }
+        },
+        "/api/settings/privacy": {
+            "get": {
+                "summary": "Privacy settings",
+                "security": [{"cookieAuth": []}],
+                "responses": {"200": {"description": "Settings payload"}},
+            },
+            "put": {
+                "summary": "Update privacy settings",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PrivacySettingsRequest"]}},
+                },
+                "responses": {"200": {"description": "Updated settings payload"}},
+            },
+        },
+        "/api/photos": {
+            "post": {
+                "summary": "Upload photo (base64 JSON)",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PhotoUploadRequest"]}},
+                },
+                "responses": {"200": {"description": "Upload result"}},
+            },
+            "delete": {
+                "summary": "Delete a photo",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PhotoDeleteRequest"]}},
+                },
+                "responses": {"200": {"description": "Delete result"}},
+            },
+        },
+        "/api/photos/raw": {
+            "post": {
+                "summary": "Upload raw image bytes",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "filename", "in": "query", "schema": {"type": "string"}},
+                    {"name": "taken_at", "in": "query", "schema": {"type": "string", "format": "date-time"}},
+                ],
+                "responses": {"200": {"description": "Upload result"}},
+            }
+        },
+        "/api/uploads/b2/init": {
+            "post": {
+                "summary": "Initialize direct B2 upload",
+                "security": [{"cookieAuth": []}],
+                "responses": {"200": {"description": "Upload URL/token"}},
+            }
+        },
+        "/api/uploads/b2/complete": {
+            "post": {
+                "summary": "Finalize direct B2 upload",
+                "security": [{"cookieAuth": []}],
+                "responses": {"200": {"description": "Finalize result"}},
+            }
+        },
+        "/api/photos/share": {
+            "post": {
+                "summary": "Create a share link",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PhotoShareRequest"]}},
+                },
+                "responses": {"200": {"description": "Share token"}},
+            },
+            "delete": {
+                "summary": "Revoke a share link",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PhotoShareRevokeRequest"]}},
+                },
+                "responses": {"200": {"description": "Revoke result"}},
+            },
+        },
+        "/api/photos/recaption": {
+            "post": {
+                "summary": "Regenerate AI caption",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["PhotoRecaptionRequest"]}},
+                },
+                "responses": {"200": {"description": "Caption payload"}},
+            }
+        },
+        "/api/photos/metadata": {
+            "get": {
+                "summary": "Metadata for a photo",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Metadata payload"}},
+            }
+        },
+        "/api/photos/shares": {
+            "get": {
+                "summary": "List share links",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Share list"}},
+            }
+        },
+        "/api/photos/acl/grant": {
+            "post": {
+                "summary": "Grant ACL access",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["AclGrantRequest"]}},
+                },
+                "responses": {"200": {"description": "Grant result"}},
+            }
+        },
+        "/api/photos/acl/revoke": {
+            "delete": {
+                "summary": "Revoke ACL access",
+                "security": [{"cookieAuth": []}],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": schemas["AclRevokeRequest"]}},
+                },
+                "responses": {"200": {"description": "Revoke result"}},
+            }
+        },
+        "/api/photos/acl": {
+            "get": {
+                "summary": "List ACL entries",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "ACL list"}},
+            }
+        },
+        "/api/photos/shared-with-me": {
+            "get": {
+                "summary": "List photos shared with the current user",
+                "security": [{"cookieAuth": []}],
+                "responses": {"200": {"description": "Shared photo list"}},
+            }
+        },
+        "/api/photos/info": {
+            "get": {
+                "summary": "Basic photo info",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Info payload"}},
+            }
+        },
+        "/api/photos/status": {
+            "get": {
+                "summary": "Processing status for a photo",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Status payload"}},
+            }
+        },
+        "/api/photos/search": {
+            "get": {
+                "summary": "Search photos",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "q", "in": "query", "schema": {"type": "string"}},
+                    {"name": "limit", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Search results"}},
+            }
+        },
+        "/api/photos/download": {
+            "get": {
+                "summary": "Download a photo",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Download payload"}},
+            }
+        },
+        "/api/photos/view": {
+            "get": {
+                "summary": "View a photo binary",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Binary image response"}},
+            }
+        },
+        "/api/photos/thumb": {
+            "get": {
+                "summary": "View a photo thumbnail",
+                "security": [{"cookieAuth": []}],
+                "parameters": [
+                    {"name": "photo_id", "in": "query", "schema": {"type": "integer"}},
+                ],
+                "responses": {"200": {"description": "Binary thumbnail response"}},
+            }
+        },
+    }
+
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": OPENAPI_TITLE,
+            "version": OPENAPI_VERSION,
+            "description": OPENAPI_DESCRIPTION,
+        },
+        "servers": [{"url": base_url}],
+        "components": {"schemas": schemas, "securitySchemes": security_schemes},
+        "paths": paths,
+    }
 
 
 def _ollama_endpoint() -> str:
@@ -1252,6 +1706,51 @@ def _register_form(
     """
 
 
+# ---------------------------------------------------------------------------
+# Liveness, readiness, and API docs routes.
+# These are intentionally placed before the main app routes to keep "ops"
+# endpoints easy to find.
+# ---------------------------------------------------------------------------
+
+@app.get("/healthz")
+async def healthz(_: Request) -> Response:
+    """Simple liveness probe used by orchestrators."""
+    return _json_response({"ok": True, "time": _now_iso()})
+
+
+@app.get("/readyz")
+async def readyz(_: Request) -> Response:
+    """Readiness probe that checks database connectivity."""
+    payload, status = await _readiness_payload()
+    return _json_response(payload, status=status)
+
+
+@app.get("/openapi.json")
+async def openapi_spec(request: Request) -> Response:
+    """Serve the OpenAPI JSON document."""
+    base_url = _request_base_url(request)
+    spec = _openapi_spec(base_url)
+    return Response(
+        status_code=200,
+        headers={"content-type": "application/json; charset=utf-8"},
+        description=json.dumps(spec),
+    )
+
+
+@app.get("/docs")
+async def swagger_docs(_: Request) -> Response:
+    """Serve the Swagger UI HTML page."""
+    html = _swagger_ui_html("/openapi.json")
+    return Response(
+        status_code=200,
+        headers={"content-type": "text/html; charset=utf-8"},
+        description=html,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public-facing HTML routes.
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def home(request: Request) -> Response:
     """Landing page that always renders regardless of authentication state."""
@@ -1278,6 +1777,9 @@ async def home(request: Request) -> Response:
     return response
 
 
+# ---------------------------------------------------------------------------
+# Authenticated HTML routes.
+# ---------------------------------------------------------------------------
 @app.get("/dashboard")
 async def dashboard(request: Request) -> Response:
     """Private dashboard that requires a valid session cookie."""
@@ -1302,6 +1804,9 @@ async def dashboard(request: Request) -> Response:
     return response
 
 
+# ---------------------------------------------------------------------------
+# User profile HTML route.
+# ---------------------------------------------------------------------------
 @app.get("/profile")
 async def profile(request: Request) -> Response:
     """Show account metadata for the signed-in user."""
@@ -1333,6 +1838,9 @@ async def profile(request: Request) -> Response:
     return response
 
 
+# ---------------------------------------------------------------------------
+# Legacy static/script hooks.
+# ---------------------------------------------------------------------------
 @app.get("/UserProfile.js")
 async def profile_js(_: Request) -> Response:
     """Placeholder script endpoint (legacy client hook)."""
@@ -1344,6 +1852,9 @@ async def profile_js(_: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Static asset helpers.
+# ---------------------------------------------------------------------------
 @app.get("/favicon.ico")
 async def favicon(_: Request) -> Response:
     """Serve the SVG favicon through a conventional .ico route."""
@@ -1357,6 +1868,9 @@ async def favicon(_: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Core profile API.
+# ---------------------------------------------------------------------------
 @app.get("/api/profile")
 async def profile_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1417,6 +1931,9 @@ async def profile_api(request: Request) -> Response:
         }
     )
 
+# ---------------------------------------------------------------------------
+# Search UI (HTML) route.
+# ---------------------------------------------------------------------------
 @app.get("/search")
 async def search_page(request: Request) -> Response:
     """AI search page for photos."""
@@ -1462,6 +1979,9 @@ def _payload_optional_bool(payload: dict, key: str) -> Optional[bool]:
     raise ValueError(f"{key} must be a boolean")
 
 
+# ---------------------------------------------------------------------------
+# Settings API.
+# ---------------------------------------------------------------------------
 @app.get("/api/settings/privacy")
 async def privacy_settings_get(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1733,6 +2253,9 @@ async def _handle_photo_upload(
     )
 
 
+# ---------------------------------------------------------------------------
+# Upload APIs (raw bytes).
+# ---------------------------------------------------------------------------
 @app.post("/api/photos/raw")
 async def upload_photo_raw_api(request: Request) -> Response:
     """Upload photo bytes directly (no base64) via request body."""
@@ -1775,6 +2298,9 @@ def _b2_get_upload_url() -> tuple[str, str]:
     return str(result["uploadUrl"]), str(result["authorizationToken"])
 
 
+# ---------------------------------------------------------------------------
+# Browser-direct Backblaze B2 upload APIs.
+# ---------------------------------------------------------------------------
 @app.post("/api/uploads/b2/init")
 async def b2_upload_init_api(request: Request) -> Response:
     """Initialize a browser-direct upload to Backblaze B2 (requires CORS on bucket)."""
@@ -1868,6 +2394,9 @@ async def b2_upload_complete_api(request: Request) -> Response:
     return _json_response({"status": "queued", "photo_id": photo_id})
 
 
+# ---------------------------------------------------------------------------
+# Upload APIs (base64 JSON payloads).
+# ---------------------------------------------------------------------------
 @app.post("/api/photos")
 async def upload_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1939,6 +2468,9 @@ def _parse_expires_in_seconds(payload: dict) -> Optional[int]:
     return seconds
 
 
+# ---------------------------------------------------------------------------
+# Share link APIs.
+# ---------------------------------------------------------------------------
 @app.post("/api/photos/share")
 async def create_share_link_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -1987,6 +2519,9 @@ async def create_share_link_api(request: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# On-demand metadata regeneration.
+# ---------------------------------------------------------------------------
 @app.post("/api/photos/recaption")
 async def recaption_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2026,6 +2561,9 @@ async def recaption_photo_api(request: Request) -> Response:
     return _json_response({"ok": True, "metadata": _metadata_response_dict(meta)})
 
 
+# ---------------------------------------------------------------------------
+# Metadata retrieval.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/metadata")
 async def photo_metadata_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2078,6 +2616,9 @@ async def photo_metadata_api(request: Request) -> Response:
     })
 
 
+# ---------------------------------------------------------------------------
+# Share listing and management.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/shares")
 async def list_share_links_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2131,6 +2672,9 @@ async def revoke_share_links_api(request: Request) -> Response:
     return _json_response({"photo_id": photo_id, "revoked": changed})
 
 
+# ---------------------------------------------------------------------------
+# Public share view (HTML-ish but minimal markup).
+# ---------------------------------------------------------------------------
 @app.get("/s")
 async def shared_photo_view(request: Request) -> Response:
     """Public view route for share links: /s?token=..."""
@@ -2153,6 +2697,9 @@ async def shared_photo_view(request: Request) -> Response:
     return _photo_view_response(owner_id, record.id, record, allow_thumbnail_fallback=True)
 
 
+# ---------------------------------------------------------------------------
+# Access-control list (ACL) APIs.
+# ---------------------------------------------------------------------------
 @app.post("/api/photos/acl/grant")
 async def grant_photo_acl_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2221,6 +2768,9 @@ async def list_photo_acl_api(request: Request) -> Response:
     return _json_response({"photo_id": photo_id, "acl": acl})
 
 
+# ---------------------------------------------------------------------------
+# "Shared with me" API.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/shared-with-me")
 async def shared_with_me_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2250,6 +2800,9 @@ async def shared_with_me_api(request: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Photo info + processing status APIs.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/info")
 async def photo_info_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2304,6 +2857,9 @@ async def photo_status_api(request: Request) -> Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# Search API for photos.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/search")
 async def search_photos_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2339,6 +2895,9 @@ async def search_photos_api(request: Request) -> Response:
     return _json_response({"photos": results})
 
 
+# ---------------------------------------------------------------------------
+# Download and view APIs for binary content.
+# ---------------------------------------------------------------------------
 @app.get("/api/photos/download")
 async def download_photo_api(request: Request) -> Response:
     """Return base64 or signed URL for a stored photo."""
@@ -2377,6 +2936,7 @@ async def download_photo_api(request: Request) -> Response:
         }
     )
 
+
 @app.get("/api/photos/view")
 async def view_photo(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2394,6 +2954,7 @@ async def view_photo(request: Request) -> Response:
 
     owner_id = int(record.user_id) if record.user_id is not None else auth.user.id
     return _photo_view_response(owner_id, photo_id, record)
+
 
 @app.get("/api/photos/thumb")
 async def view_photo_thumbnail(request: Request) -> Response:
@@ -2467,6 +3028,9 @@ async def view_photo_thumbnail(request: Request) -> Response:
     return _photo_view_response(owner_id, photo_id, record)
 
 
+# ---------------------------------------------------------------------------
+# Destructive operations.
+# ---------------------------------------------------------------------------
 @app.delete("/api/photos")
 async def delete_photo_api(request: Request) -> Response:
     auth = await _ensure_authenticated(request)
@@ -2524,6 +3088,9 @@ async def delete_photo_api(request: Request) -> Response:
     return _json_response({"status": "deleted", "photo_id": photo_id})
 
 
+# ---------------------------------------------------------------------------
+# Authentication flows (login/register/logout).
+# ---------------------------------------------------------------------------
 @app.get("/login")
 async def login_get(request: Request) -> Response:
     """Render the login form and show flash messages if redirected from registration."""

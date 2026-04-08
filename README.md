@@ -52,6 +52,10 @@ This repository contains a Robyn-based web app for user authentication, profile 
 
 ## Routes
 - `GET /` – landing page with the current authentication status.
+- `GET /healthz` – liveness probe (returns `{ "ok": true }`).
+- `GET /readyz` – readiness probe (verifies database connectivity).
+- `GET /docs` – Swagger UI for the API.
+- `GET /openapi.json` – OpenAPI 3.0 spec consumed by Swagger UI.
 - `GET /register` + `POST /register` – create a new username/email + password.
 - `GET /login` + `POST /login` – authenticate and receive a session cookie.
 - `GET /dashboard`, `GET /profile` – require an active session cookie and redirect to `/login` if missing.
