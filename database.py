@@ -397,6 +397,20 @@ class Database:
             )
             await conn.commit()
 
+    async def healthcheck(self) -> bool:
+        """
+        Lightweight readiness probe for the sqlite database.
+
+        We avoid touching application tables here; a trivial SELECT is enough
+        to confirm the file is reachable and SQLite can execute a statement.
+        """
+        try:
+            async with self._connection() as conn:
+                await conn.execute("SELECT 1;")
+            return True
+        except Exception:
+            return False
+
     async def fetch_one(
         self, query: str, params: Sequence[Any]
     ) -> Optional[aiosqlite.Row]:
